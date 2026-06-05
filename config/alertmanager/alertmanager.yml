@@ -1,0 +1,31 @@
+# ============================================================
+# Alertmanager — конфиг
+# На этом этапе все алерты идут в null-receiver (просто видны в UI).
+# В проекте №5 (AIOps) сюда добавим webhook в n8n → LLM → Telegram.
+# ============================================================
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: 'default'
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: 'default'
+    # пустой receiver — алерты только в UI Alertmanager
+    # для webhook в n8n раскомментируй:
+    # webhook_configs:
+    #   - url: 'http://n8n:5678/webhook/alerts'
+    #     send_resolved: true
+
+inhibit_rules:
+  # critical подавляет warning по тому же alertname/instance
+  - source_match:
+      severity: critical
+    target_match:
+      severity: warning
+    equal: ['alertname', 'instance']

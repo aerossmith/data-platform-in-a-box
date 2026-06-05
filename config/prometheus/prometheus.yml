@@ -1,0 +1,54 @@
+# ============================================================
+# Prometheus — основной конфиг
+# Скрапит метрики со всех компонентов стека
+# ============================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: dpib
+
+# Подключаем правила алертов
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Куда отправлять алерты
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Что мониторим
+scrape_configs:
+
+  # сам Prometheus
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # метрики хоста (CPU, RAM, диск, сеть)
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # метрики контейнеров (Docker)
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # PostgreSQL — через postgres-exporter
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # ClickHouse — встроенный эндпоинт
+  - job_name: clickhouse
+    static_configs:
+      - targets: ["clickhouse:9363"]
+
+  # Alertmanager (мониторим сам мониторинг)
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]

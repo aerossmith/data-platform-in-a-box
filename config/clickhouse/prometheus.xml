@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!-- ============================================================
+     Включаем prometheus endpoint в ClickHouse
+     Маунтится в /etc/clickhouse-server/config.d/
+     После старта метрики доступны на http://clickhouse:9363/metrics
+     ============================================================ -->
+<clickhouse>
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+        <status_info>true</status_info>
+    </prometheus>
+</clickhouse>

@@ -1,0 +1,90 @@
+# ============================================================
+# Prometheus — правила алертов
+# Базовый набор для лаборатории
+# ============================================================
+
+groups:
+
+  # ---------- Доступность сервисов ----------
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервис {{ $labels.job }} недоступен"
+          description: "Цель {{ $labels.instance }} (job: {{ $labels.job }}) не отвечает более 1 минуты."
+
+  # ---------- Ресурсы хоста ----------
+  - name: host_resources
+    rules:
+      - alert: HighCpuUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая загрузка CPU на {{ $labels.instance }}"
+          description: "CPU > 85% уже 5 минут (текущее значение: {{ $value | printf \"%.1f\" }}%)."
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокое использование памяти на {{ $labels.instance }}"
+          description: "Использовано > 90% RAM ({{ $value | printf \"%.1f\" }}%)."
+
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Мало места на диске {{ $labels.mountpoint }} ({{ $labels.instance }})"
+          description: "Занято > 80% ({{ $value | printf \"%.1f\" }}%)."
+
+  # ---------- PostgreSQL ----------
+  - name: postgresql
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL недоступен"
+          description: "postgres-exporter не может подключиться к БД более 1 минуты."
+
+      - alert: PostgresTooManyConnections
+        expr: sum by (instance) (pg_stat_activity_count) > pg_settings_max_connections * 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL: много активных подключений"
+          description: "Использовано > 80% от max_connections."
+
+  # ---------- ClickHouse ----------
+  - name: clickhouse
+    rules:
+      - alert: ClickHouseTooManyParts
+        expr: ClickHouseAsyncMetrics_MaxPartCountForPartition > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse: много активных частей в партиции"
+          description: "MaxPartCountForPartition > 300 — проблемы с мержами."
+
+      - alert: ClickHouseReplicationLag
+        expr: ClickHouseAsyncMetrics_ReplicasMaxAbsoluteDelay > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse: лаг репликации"
+          description: "Replication lag > 60 секунд."

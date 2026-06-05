@@ -1,0 +1,26 @@
+# Локальные настройки и секреты
+.env
+.env.local
+*.env.local
+
+# Логи и временные файлы
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python (для будущих скриптов)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Локальные тома если кто-то решит хранить bind-mount
+data/

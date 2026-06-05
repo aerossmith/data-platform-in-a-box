@@ -1,0 +1,220 @@
+name: dpib
+
+# ============================================================
+# Data Platform in a Box
+# Профили:
+#   core          — PostgreSQL + ClickHouse (фундамент)
+#   monitoring    — Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter
+#   orchestration — Airflow (шаг 3)
+#   viz           — Superset (шаг 4)
+#   ai            — Qdrant (шаг 5)
+# ============================================================
+
+services:
+
+  # ========== CORE ==========
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dpib-postgres
+    profiles: ["core"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dpib}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dpib_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-dpib}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 1g
+    networks:
+      - dpib_net
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: dpib-clickhouse
+    profiles: ["core"]
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-dpib}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-dpib}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dpib_pass}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+      - "${CLICKHOUSE_METRICS_PORT:-9363}:9363"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      - ./init/clickhouse:/docker-entrypoint-initdb.d:ro
+      - ./config/clickhouse:/etc/clickhouse-server/config.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    mem_limit: 2g
+    networks:
+      - dpib_net
+
+
+  # ========== MONITORING ==========
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: dpib-prometheus
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=14d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./config/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    networks:
+      - dpib_net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: dpib-alertmanager
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./config/alertmanager:/etc/alertmanager:ro
+      - alertmanager_data:/alertmanager
+    mem_limit: 128m
+    networks:
+      - dpib_net
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: dpib-grafana
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_INSTALL_PLUGINS: "grafana-clickhouse-datasource"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    mem_limit: 512m
+    networks:
+      - dpib_net
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: dpib-node-exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    mem_limit: 64m
+    networks:
+      - dpib_net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: dpib-cadvisor
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    mem_limit: 256m
+    networks:
+      - dpib_net
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: dpib-postgres-exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-dpib}:${POSTGRES_PASSWORD:-dpib_pass}@postgres:5432/${POSTGRES_DB:-dpib}?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 64m
+    networks:
+      - dpib_net
+
+
+# ============================================================
+# Сеть
+# ============================================================
+networks:
+  dpib_net:
+    name: dpib_net
+    driver: bridge
+
+# ============================================================
+# Тома (persist данных)
+# ============================================================
+volumes:
+  postgres_data:
+    name: dpib_postgres_data
+  clickhouse_data:
+    name: dpib_clickhouse_data
+  clickhouse_logs:
+    name: dpib_clickhouse_logs
+  prometheus_data:
+    name: dpib_prometheus_data
+  grafana_data:
+    name: dpib_grafana_data
+  alertmanager_data:
+    name: dpib_alertmanager_data
