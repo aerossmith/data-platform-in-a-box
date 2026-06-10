@@ -16,7 +16,7 @@
 - `monitoring` — Prometheus, Grafana, Alertmanager, node-exporter, cAdvisor, postgres-exporter
 - Включены встроенные prometheus-метрики ClickHouse
 - Готовый дашборд DPIB Overview + базовые алерты
-- GitHub Actions CI: lint + smoke test
+- GitHub Actions CI: статический lint (compose / YAML / XML / JSON / SQL)
 
 Дальше по плану: оркестрация (Airflow) → визуализация (Superset) → AI-слой (Qdrant).
 
@@ -109,7 +109,7 @@ make reset                             # ОПАСНО: удалит тома и 
 
 ```
 data-platform-in-a-box/
-├── .github/workflows/ci.yml            ← GitHub Actions: lint + smoke test
+├── .github/workflows/ci.yml            ← GitHub Actions: статические проверки
 ├── docker-compose.yml
 ├── .env.example
 ├── Makefile
@@ -158,10 +158,20 @@ data-platform-in-a-box/
 
 ## CI / CD
 
-На каждый push в `main` и каждый pull request запускается pipeline в GitHub Actions:
+На каждый push в `main` и каждый pull request запускается pipeline в GitHub Actions.
+Только статические проверки — без подъёма контейнеров, прогон занимает 20–30 секунд:
 
-1. **lint** — `docker compose config` валидирует синтаксис, `yamllint` проверяет все YAML-конфиги
-2. **smoke-test** — поднимает профиль `core`, проверяет healthcheck PostgreSQL и ClickHouse, прогоняет тестовые запросы, останавливает стек
+| Что проверяем                       | Чем                       |
+|------------------------------------|---------------------------|
+| Синтаксис docker-compose.yml       | `docker compose config`   |
+| YAML-конфиги (Prometheus, Grafana) | `yamllint`                |
+| XML-конфиги ClickHouse             | `xmllint`                 |
+| JSON дашбордов Grafana             | `jq empty`                |
+| SQL init-скрипты (style, warn-only)| `sqlfluff`                |
+
+Smoke-тест с поднятием стека и проверкой данных делается локально через `make up` —
+для CI он избыточен и капризен на shared-раннерах (ClickHouse healthcheck в Alpine
+ругается на capabilities). Если понадобится — есть `workflow_dispatch` для ручного запуска.
 
 Статус — в бейджике в начале README.
 
