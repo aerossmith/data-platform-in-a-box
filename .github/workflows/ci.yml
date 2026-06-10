@@ -1,0 +1,88 @@
+name: CI
+
+# ============================================================
+# Pipeline для data-platform-in-a-box
+# 1. lint        — синтаксис docker-compose + YAML
+# 2. smoke-test  — поднять core, проверить БД, опустить
+# ============================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # ручной запуск из Actions UI
+
+jobs:
+
+  lint:
+    name: Lint configs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare .env
+        run: cp .env.example .env
+
+      - name: Validate docker-compose syntax
+        run: docker compose config --quiet
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: YAML lint
+        run: |
+          yamllint -d '{
+            extends: default,
+            rules: {
+              line-length: disable,
+              document-start: disable,
+              truthy: disable,
+              comments-indentation: disable,
+              indentation: {spaces: 2, indent-sequences: consistent}
+            }
+          }' config/ docker-compose.yml .github/
+
+  smoke-test:
+    name: Smoke test (core profile)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare .env
+        run: cp .env.example .env
+
+      - name: Start core profile
+        run: docker compose --profile core up -d --wait
+        timeout-minutes: 3
+
+      - name: Show running containers
+        run: docker compose --profile core ps
+
+      - name: Check PostgreSQL
+        run: |
+          docker exec dpib-postgres pg_isready -U dpib -d dpib
+          docker exec dpib-postgres psql -U dpib -d dpib \
+            -c "SELECT count(*) AS users FROM analytics.users;" \
+            -c "SELECT count(*) AS events FROM analytics.events;"
+
+      - name: Check ClickHouse HTTP ping
+        run: |
+          docker exec dpib-clickhouse wget -qO- http://localhost:8123/ping
+
+      - name: Check ClickHouse data
+        run: |
+          docker exec dpib-clickhouse clickhouse-client \
+            --user dpib --password dpib_pass --database dpib \
+            --query "SELECT 'events_analytics' AS tbl, count() AS rows FROM events_analytics"
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose --profile core logs --tail=200
+
+      - name: Cleanup
+        if: always()
+        run: docker compose --profile core down -v

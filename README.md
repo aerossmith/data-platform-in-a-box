@@ -1,5 +1,7 @@
 # Data Platform in a Box
 
+![CI](https://github.com/REPLACE_WITH_YOUR_LOGIN/data-platform-in-a-box/actions/workflows/ci.yml/badge.svg)
+
 Локальная DWH/BI платформа в Docker Compose — единый стек для аналитики и фундамент для AI/DevOps-проектов.
 
 Подробный план: [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
@@ -14,6 +16,7 @@
 - `monitoring` — Prometheus, Grafana, Alertmanager, node-exporter, cAdvisor, postgres-exporter
 - Включены встроенные prometheus-метрики ClickHouse
 - Готовый дашборд DPIB Overview + базовые алерты
+- GitHub Actions CI: lint + smoke test
 
 Дальше по плану: оркестрация (Airflow) → визуализация (Superset) → AI-слой (Qdrant).
 
@@ -106,6 +109,7 @@ make reset                             # ОПАСНО: удалит тома и 
 
 ```
 data-platform-in-a-box/
+├── .github/workflows/ci.yml            ← GitHub Actions: lint + smoke test
 ├── docker-compose.yml
 ├── .env.example
 ├── Makefile
@@ -115,17 +119,19 @@ data-platform-in-a-box/
 │   ├── postgres/01_init.sql
 │   └── clickhouse/01_init.sql
 ├── config/
-│   ├── clickhouse/prometheus.xml        ← включает метрики в ClickHouse
+│   ├── clickhouse/
+│   │   ├── prometheus.xml              ← включает метрики
+│   │   └── network.xml                 ← listen_host = 0.0.0.0
 │   ├── prometheus/
-│   │   ├── prometheus.yml               ← targets для скрапинга
-│   │   └── alerts.yml                   ← правила алертов
+│   │   ├── prometheus.yml              ← targets для скрапинга
+│   │   └── alerts.yml                  ← правила алертов
 │   ├── alertmanager/alertmanager.yml
 │   └── grafana/
 │       ├── provisioning/
 │       │   ├── datasources/datasources.yml
 │       │   └── dashboards/dashboards.yml
 │       └── dashboards/dpib-overview.json
-└── docs/                                ← TBD: runbooks для будущего RAG
+└── docs/                               ← TBD: runbooks для будущего RAG
 ```
 
 ---
@@ -150,9 +156,19 @@ data-platform-in-a-box/
 
 ---
 
+## CI / CD
+
+На каждый push в `main` и каждый pull request запускается pipeline в GitHub Actions:
+
+1. **lint** — `docker compose config` валидирует синтаксис, `yamllint` проверяет все YAML-конфиги
+2. **smoke-test** — поднимает профиль `core`, проверяет healthcheck PostgreSQL и ClickHouse, прогоняет тестовые запросы, останавливает стек
+
+Статус — в бейджике в начале README.
+
+---
+
 ## Что дальше
 
-**Шаг 3** — Airflow для оркестрации. Готовый DAG, который перекладывает данные из PostgreSQL в ClickHouse через staging. Это база для будущего dbt-pipeline (проект №2 из общего roadmap).
+**Шаг 3** — Airflow для оркестрации. Готовый DAG, который перекладывает данные из PostgreSQL в ClickHouse через staging. База для будущего dbt-pipeline.
 
 Полный план — в [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
-# data-platform-in-a-box
