@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare .env
         run: cp .env.example .env
@@ -50,14 +50,17 @@ jobs:
     needs: lint
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare .env
         run: cp .env.example .env
 
+      - name: Pull images
+        run: docker compose --profile core pull --quiet
+
       - name: Start core profile
-        run: docker compose --profile core up -d --wait
-        timeout-minutes: 3
+        run: docker compose --profile core up -d --wait --wait-timeout 180
+        timeout-minutes: 5
 
       - name: Show running containers
         run: docker compose --profile core ps
@@ -79,9 +82,13 @@ jobs:
             --user dpib --password dpib_pass --database dpib \
             --query "SELECT 'events_analytics' AS tbl, count() AS rows FROM events_analytics"
 
-      - name: Show logs on failure
+      - name: ClickHouse logs on failure
         if: failure()
-        run: docker compose --profile core logs --tail=200
+        run: docker compose --profile core logs --tail=300 clickhouse
+
+      - name: PostgreSQL logs on failure
+        if: failure()
+        run: docker compose --profile core logs --tail=100 postgres
 
       - name: Cleanup
         if: always()
