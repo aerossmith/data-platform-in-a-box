@@ -155,3 +155,4 @@ data-platform-in-a-box/
 **Шаг 3** — Airflow для оркестрации. Готовый DAG, который перекладывает данные из PostgreSQL в ClickHouse через staging. Это база для будущего dbt-pipeline (проект №2 из общего roadmap).
 
 Полный план — в [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
+# data-platform-in-a-box
