@@ -1,224 +1,278 @@
 # Data Platform in a Box — План проекта
 
-Версия: 1.0
-Дата: май 2026
+Версия: 2.0
+Дата: июнь 2026
+Изменения от v1.0: зафиксированы домены данных (HH.ru, HuggingFace),
+введена медальонная архитектура bronze/silver/gold, переформулированы шаги 3–4
+с акцентом на полезной нагрузке и one-command demo.
 
 ---
 
 ## Цель
 
-Единая DWH/BI платформа в Docker Compose — рабочий стенд для аналитики и фундамент для AI/DevOps-проектов (RAG-агент, Text-to-SQL, AIOps).
+Локальная DWH/BI платформа в Docker Compose с **реальной полезной нагрузкой**,
+поднимаемая одной командой. Используется как:
+
+- рабочий стенд для аналитики реальных данных
+- фундамент для AI/DevOps-проектов (RAG, Text-to-SQL, AIOps)
+- portfolio-демонстрация платформенных навыков
+
+---
+
+## Домены данных
+
+### Домен №1 (основной): HH.ru — рынок труда в IT
+
+API: `api.hh.ru` — публичный, без авторизации, без VPN. Метод `/vacancies`
+с фильтрами по специализации, региону, опыту, плюс справочники `/dictionaries`
+и работодатели через `/employers`.
+
+**Что собираем:**
+
+- Открытые вакансии по DevOps, SRE, Platform Engineer, Data Engineer, ML Engineer
+- Регионы: Москва, СПб, удалёнка, плюс топ-городов
+- Фильтры опыта, занятости, графика работы
+- Работодатели с метаинформацией
+
+**Подход — snapshot.** Каждые 30 минут Airflow тянет свежую страницу выдачи,
+складывает raw JSON в bronze. История строится естественно: со временем
+видно, какие вакансии висят долго, какие быстро закрываются, как меняется
+медиана по неделям, какие навыки растут в спросе.
+
+**Почему именно этот домен:**
+
+- доступ напрямую из РФ, никаких прокси
+- релевантен лично — параллельный мониторинг своего же рынка
+- на собеседовании естественный ответ «зачем именно это»
+- объём приличный: ~10k+ DevOps-вакансий в любой момент
+
+### Домен №2 (вторичный, после стабилизации №1): HuggingFace — каталог моделей
+
+API: `huggingface.co/api/models`. Открытый, без VPN. Та же snapshot-схема —
+раз в час слепок топ-N моделей с метаданными (downloads, likes, теги, тип задачи,
+автор, базовая модель-родитель). История даёт тренды популярности LLM,
+динамику новых релизов, активность авторов.
+
+**Почему вторым:**
+
+- демонстрирует, что платформа multi-source (важно для портфолио)
+- релевантно LLMOps-позиционированию (второй пет-проект)
+- та же архитектура — те же bronze/silver/gold принципы
+
+---
+
+## Медальонная архитектура
+
+Стандарт индустрии — три слоя с явным разделением ответственности.
+
+### Bronze — сырые данные «как пришли»
+
+Принцип неизменности: что API отдал, то и легло. Никогда не удаляем,
+никогда не модифицируем. Источник правды.
+
+```sql
+CREATE TABLE bronze_hh_vacancies (
+    ingested_at  DateTime DEFAULT now(),
+    snapshot_id  UUID,                     -- ID запуска DAG
+    source       LowCardinality(String),   -- 'hh.ru'
+    raw_json     String,                   -- весь объект как пришёл
+    vacancy_id   String                    -- из raw для быстрого поиска
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(ingested_at)
+ORDER BY (ingested_at, vacancy_id);
+```
+
+### Silver — нормализованные данные
+
+Парсинг JSON, типизация, ETL. Идемпотентность через ReplacingMergeTree —
+если запустить пайплайн дважды, дублей не появится.
+
+```sql
+CREATE TABLE silver_vacancies (
+    vacancy_id      String,
+    snapshot_at     DateTime,
+    title           String,
+    company_id      String,
+    company_name    String,
+    salary_from     Nullable(Decimal(12,2)),
+    salary_to       Nullable(Decimal(12,2)),
+    salary_currency LowCardinality(String),
+    experience      LowCardinality(String),
+    employment      LowCardinality(String),
+    area_name       LowCardinality(String),
+    published_at    DateTime,
+    skills          Array(String),         -- распарсенные из описания
+    description     String,
+    raw_ingested_at DateTime                -- для версионирования
+) ENGINE = ReplacingMergeTree(raw_ingested_at)
+ORDER BY (vacancy_id, snapshot_at);
+```
+
+### Gold — аналитические витрины (через dbt)
+
+Агрегаты, тренды, ranking. Готово к подключению в Superset.
+
+Примеры моделей:
+
+- `mart_salary_by_role_week` — медиана зарплат по ролям и неделям
+- `mart_skills_demand` — ранжирование навыков по упоминаниям в описаниях
+- `mart_employers_activity` — топ-работодатели по активности найма
+- `mart_vacancy_lifetime` — сколько живёт вакансия до закрытия
+- `mart_remote_vs_office` — динамика удалёнки vs офис по неделям
 
 ---
 
 ## Состав стека
 
-### Ядро (core)
-- **PostgreSQL 15/16** — OLTP, метаданные Airflow/Superset, хранилище состояний агентов
-- **ClickHouse** — аналитический движок, целевая база для Text-to-SQL
-
-### Оркестрация (orchestration)
-- **Airflow 2.9+** — ETL/ELT пайплайны, интеграция с dbt
-
-### Визуализация (viz)
-- **Superset** — дашборды поверх PostgreSQL и ClickHouse
-- **Grafana** — мониторинг и операционные дашборды
-
-### Мониторинг (monitoring)
-- **Prometheus** — сбор метрик со всех сервисов
-- **Alertmanager** — правила алертинга, webhook в n8n/Telegram
-- **node-exporter** — метрики хоста
-- **cAdvisor** — метрики контейнеров
-
-### AI-слой (ai)
-- **Qdrant** — векторная база для RAG (runbook-агент)
-
-### Прокси (proxy)
-- **Traefik** или **Nginx** — единая точка входа, проксирование UI
+| Слой | Инструмент | Назначение |
+|------|-----------|-----------|
+| Core OLTP | PostgreSQL 16 | Метаданные Airflow, состояние агентов |
+| Core OLAP | ClickHouse 24 | Все три слоя bronze/silver/gold |
+| Оркестрация | Airflow 2.9+ | Ingest, нормализация, dbt run |
+| Трансформации | dbt + ClickHouse | Gold-витрины с тестами качества |
+| Визуализация | Superset | Дашборд из коробки |
+| Мониторинг | Prometheus + Grafana + Alertmanager | Observability стека (наш USP) |
+| Экспортёры | node-exporter, cAdvisor, postgres-exporter | Метрики хоста, контейнеров, БД |
+| AI-слой | Qdrant | Векторная база для RAG (этап AI) |
+| Прокси | Traefik | Единая точка входа |
 
 ---
 
-## Архитектура запуска
+## Что НЕ берём (отличия от эталонной статьи)
 
-Docker Compose с профилями — можно поднять весь стек или отдельные части:
+| Инструмент | Почему пропускаем |
+|-----------|-------------------|
+| Apache Kafka | Snapshot-подход через REST API не требует стриминга. Kafka вернётся на этапе AIOps если будет нужен event-bus для алертов |
+| Apache Spark | Объёмы лабораторные, ClickHouse сам считает rolling window через оконные функции на порядки быстрее. Spark оправдан при горизонтальном масштабировании, которого здесь не будет |
+| MinIO | Промежуточное S3-хранилище избыточно для REST-данных. ClickHouse напрямую складывает в bronze |
+
+### Что добавляем своего (чего нет в эталонной статье)
+
+- **Полноценный мониторинг и алертинг стека** — Prometheus, Grafana, Alertmanager, экспортёры. Это наш USP для DevOps/Platform-позиционирования
+- **AI-слой** — Qdrant и RAG-агент поверх runbook-документации
+- **CI/CD на GitHub Actions** — статические проверки (compose syntax, yamllint, xmllint, jq, sqlfluff)
+
+---
+
+## Структура запуска
 
 ```bash
-# всё
-docker compose --profile core --profile orchestration --profile viz --profile monitoring --profile ai up -d
+# базовая инфраструктура (то что уже работает)
+make up PROFILES="core monitoring"
 
-# только базы
-docker compose --profile core up -d
-
-# базы + мониторинг
-docker compose --profile core --profile monitoring up -d
+# полный стек с данными (one-command demo)
+make demo
 ```
+
+`make demo` поднимает стек, ждёт healthcheck-и, накатывает первый snapshot
+вакансий, прогоняет dbt build, регистрирует datasource в Superset и
+загружает готовый дашборд. Через 5 минут после команды — рабочая платформа
+с реальными данными. Это критичный аспект для презентации в портфолио.
 
 ---
 
-## Инфраструктурные принципы
+## Этапы (актуальная очерёдность)
 
-- Отдельная docker-сеть с предсказуемыми именами хостов (postgres, clickhouse, airflow и т.д.)
-- Persist-тома для данных — `make down && make up` не убивает данные
-- Healthcheck на каждом сервисе
-- `.env.example` с параметрами (версии образов, порты, пароли)
-- `init/` — SQL-скрипты для начальных схем и тестовых данных
-- Grafana provisioning — дашборды и datasources из файлов, без ручной настройки
-
-### Makefile
-
-```makefile
-up:        docker compose --profile core --profile orchestration --profile viz --profile monitoring up -d
-down:      docker compose down
-status:    docker compose ps
-logs:      docker compose logs -f $(svc)
-reset:     docker compose down -v && docker compose --profile core up -d
-```
-
----
-
-## Документация
-
-```
-README.md                    — архитектура, quick start, скриншоты
-docs/architecture.md         — обоснование выбора компонентов, диаграмма
-docs/runbooks/               — регламенты эксплуатации (→ потом в RAG)
-docs/runbooks/postgresql.md  — VACUUM, репликация, бэкапы
-docs/runbooks/clickhouse.md  — мержи, партиции, реплики
-docs/runbooks/airflow.md     — DAG-операции, zombie tasks, очистка
-```
-
----
-
-## Что можно совместить из «базы» и «выроста»
-
-Некоторые элементы из «выроста» дешёво добавить сразу, без дополнительных сложностей:
-
-### Брать сразу (затраты минимальные, польза большая)
-
-1. **Alertmanager** — это буквально ещё один контейнер + файл с правилами. Без него Prometheus собирает метрики в пустоту. Правила на старте: контейнер упал, диск > 80%, replication lag. Webhook в Telegram через n8n.
-
-2. **cAdvisor** — один контейнер, zero-config. Даёт метрики всех контейнеров в Prometheus из коробки.
-
-3. **Grafana provisioning** — дашборды из JSON-файлов при старте. Трудозатраты те же, что при ручной настройке, но результат воспроизводим и лежит в git.
-
-4. **GitLab CI: lint + smoke test** — простой `.gitlab-ci.yml`: проверяет docker-compose.yml на валидность и делает `docker compose up → curl healthcheck → docker compose down`. 30 минут на настройку, зато при каждом коммите уверен что ничего не сломал.
-
-5. **docs/runbooks/** — писать регламенты параллельно с настройкой. Настроил PostgreSQL → записал как делал. Эти же файлы потом идут в Qdrant для RAG-агента.
-
-### Оставить на вырост (требуют отдельного погружения)
-
-- Kubernetes + Helm — другая парадигма, другие знания
-- Terraform для Yandex Cloud — нужен аккаунт, биллинг, сеть
-- Ansible — имеет смысл только при нескольких хостах
-- ArgoCD / GitOps — нужен работающий кластер K8s
-- Vault — оверкилл для локального стенда
+| # | Этап | Статус |
+|---|------|--------|
+| 1 | Core (PostgreSQL + ClickHouse) | ✅ |
+| 2 | Monitoring (Prometheus + Grafana + экспортёры) | ✅ |
+| 2.5 | CI на GitHub Actions (статический lint) | ✅ |
+| 3 | **Orchestration** — Airflow + ingest HH.ru + bronze/silver | 🔜 следующий |
+| 4 | **dbt** — gold-витрины + тесты качества | ⏳ |
+| 5 | **Viz** — Superset с автонастроенным дашбордом | ⏳ |
+| 6 | `make demo` — one-command deploy с данными | ⏳ |
+| 7 | **AI-слой** — Qdrant + первые runbook'и в RAG | ⏳ |
+| 8 | Alertmanager → n8n webhook (AIOps-lite) | ⏳ |
+| 9 | Второй коннектор: HuggingFace | ⏳ |
+| 10 | Финальный README, диаграмма архитектуры, screenshots | ⏳ |
 
 ---
 
 ## Системные требования
 
-### Базовый стек (Docker Compose на локальной машине)
+### Локальный запуск (целевая машина: i5 12-gen, 32 GB RAM, RTX 3050, SSD)
 
-Твоё железо: i5 12-gen, 32 GB RAM, RTX 3050 8GB VRAM, SSD.
+| Профиль | RAM | Время первого `make demo` |
+|---------|-----|---------------------------|
+| core | ~3 GB | 20 сек |
+| + monitoring | ~5 GB | 30 сек |
+| + orchestration | ~7 GB | 1-2 мин |
+| + viz | ~8 GB | 1 мин |
+| + ai (Qdrant) | ~9 GB | 30 сек |
+| **итого полный demo** | **~9 GB** | **3-5 мин** |
 
-| Компонент       | RAM        | CPU       | Диск       | Примечание                              |
-|----------------|------------|-----------|------------|-----------------------------------------|
-| PostgreSQL     | 512 MB–1 GB | 0.5 ядра | 1–5 GB     | shared_buffers = 256 MB для лабы        |
-| ClickHouse     | 1–2 GB     | 1 ядро   | 2–10 GB    | жрёт при больших запросах, но для лабы ок |
-| Airflow        | 1–1.5 GB   | 1 ядро   | 500 MB     | webserver + scheduler + triggerer       |
-| Superset       | 512 MB–1 GB | 0.5 ядра | 500 MB     | тяжёлый на старте, потом отпускает      |
-| Prometheus     | 256–512 MB | 0.25 ядра | 1–5 GB    | зависит от retention (14 дней по умолч.) |
-| Grafana        | 256 MB     | 0.25 ядра | 100 MB     | лёгкий                                  |
-| Alertmanager   | 64 MB      | минимум   | 50 MB      | почти ничего не ест                     |
-| cAdvisor       | 128 MB     | 0.25 ядра | —          | read-only, без персиста                 |
-| node-exporter  | 32 MB      | минимум   | —          | совсем лёгкий                           |
-| Qdrant         | 512 MB–1 GB | 0.5 ядра | 500 MB–2 GB| зависит от объёма эмбеддингов           |
-| Traefik/Nginx  | 64–128 MB  | минимум   | 50 MB      | —                                       |
-| **ИТОГО**      | **5–9 GB** | **4–5 ядер** | **6–25 GB** | —                                   |
-
-**Вердикт**: на 32 GB RAM влезает комфортно. Остаётся ~23 GB на систему, WSL, LM Studio и браузер. SSD обязателен — ClickHouse и PostgreSQL чувствительны к IOPS. GPU тут не нужен (нужен только для LLM-инференса в LM Studio).
-
-**Совет**: в docker-compose ставь `mem_limit` на тяжёлые сервисы (ClickHouse, Airflow, Superset), чтобы один контейнер не сожрал всё.
+Запас огромный, GPU не задействован (нужен только для LM Studio за пределами стека).
 
 ### Вырост: Kubernetes + Yandex Cloud
 
-| Конфигурация      | Ноды                   | RAM       | Диск     | Стоимость (YC, ≈)     |
-|-------------------|------------------------|-----------|----------|------------------------|
-| Минимальный K8s   | 3× s3-c2-m8 (2 vCPU, 8 GB) | 24 GB     | 90 GB SSD | ~15 000 ₽/мес         |
-| Рабочий K8s       | 3× s3-c4-m16 (4 vCPU, 16 GB)| 48 GB    | 200 GB SSD| ~30 000 ₽/мес         |
-| С GPU (для LLM)   | + 1× g2-c8-m64-g1     | +64 GB    | +100 GB  | +60 000 ₽/мес (T4)    |
+| Конфигурация | Ноды | RAM | Диск | Стоимость (YC, ≈) |
+|--------------|------|-----|------|-------------------|
+| Минимальный K8s | 3× s3-c2-m8 (2 vCPU, 8 GB) | 24 GB | 90 GB SSD | ~15 000 ₽/мес |
+| Рабочий K8s | 3× s3-c4-m16 (4 vCPU, 16 GB) | 48 GB | 200 GB SSD | ~30 000 ₽/мес |
+| С GPU (для LLM) | + 1× g2-c8-m64-g1 | +64 GB | +100 GB | +60 000 ₽/мес (T4) |
 
-Плюс managed-сервисы (если заменять контейнеры):
+Плюс managed-сервисы по выбору:
+
 - Managed PostgreSQL — от 5 000 ₽/мес (s3-c2-m8, 50 GB)
 - Managed ClickHouse — от 8 000 ₽/мес
 - Object Storage (S3) для бэкапов — копейки на малых объёмах
 
-**Совет**: на этапе K8s можно держать PostgreSQL и ClickHouse как managed-сервисы в YC, а в кластере крутить только stateless-компоненты (Airflow, Superset, Grafana, агенты). Это проще в эксплуатации и ближе к продакшн-паттернам.
+**Стратегия миграции:** на этапе K8s держать PostgreSQL и ClickHouse как
+managed-сервисы YC, а в кластере крутить только stateless-компоненты
+(Airflow, Superset, Grafana, агенты). Ближе к продакшн-паттернам, проще
+в эксплуатации.
 
 ---
 
-## Структура репозитория
+## Структура репозитория (целевая, к концу всех этапов)
 
 ```
 data-platform-in-a-box/
+├── .github/workflows/ci.yml
 ├── docker-compose.yml
 ├── .env.example
 ├── Makefile
 ├── README.md
+├── PROJECT_PLAN.md
+├── init/
+│   ├── postgres/01_init.sql           ← + создание БД для Airflow
+│   └── clickhouse/
+│       ├── 01_schema.sql              ← bronze/silver схемы
+│       └── 02_test_data.sql           ← опционально
+├── config/
+│   ├── clickhouse/
+│   ├── prometheus/
+│   ├── alertmanager/
+│   ├── grafana/
+│   ├── airflow/                       ← (этап 3)
+│   └── superset/                      ← (этап 5)
+├── dags/                              ← Airflow DAG-и (этап 3)
+│   ├── hh_snapshot.py
+│   └── hh_silver_normalize.py
+├── dbt/                               ← dbt-проект (этап 4)
+│   ├── models/silver/
+│   ├── models/gold/
+│   └── tests/
 ├── docs/
 │   ├── architecture.md
-│   └── runbooks/
-│       ├── postgresql.md
-│       ├── clickhouse.md
-│       └── airflow.md
-├── config/
-│   ├── prometheus/
-│   │   ├── prometheus.yml
-│   │   └── alerts.yml
-│   ├── grafana/
-│   │   ├── provisioning/
-│   │   │   ├── datasources.yml
-│   │   │   └── dashboards.yml
-│   │   └── dashboards/
-│   │       ├── postgres.json
-│   │       ├── clickhouse.json
-│   │       └── containers.json
-│   ├── alertmanager/
-│   │   └── alertmanager.yml
-│   ├── traefik/
-│   │   └── traefik.yml
-│   └── airflow/
-│       └── airflow.cfg (или через env vars)
-├── init/
-│   ├── postgres/
-│   │   └── 01_init.sql
-│   └── clickhouse/
-│       └── 01_init.sql
-├── dags/
-│   └── example_dag.py
-└── .gitlab-ci.yml
+│   ├── decisions/                     ← ADR
+│   └── runbooks/                      ← регламенты (потом в RAG)
+└── scripts/
+    ├── demo_seed.sh                   ← заливка первого snapshot
+    └── superset_bootstrap.py          ← регистрация datasource и дашборда
 ```
 
 ---
 
-## Порядок реализации
+## Связь с остальными пет-проектами
 
-1. **docker-compose.yml** — профиль `core` (PostgreSQL + ClickHouse) + healthchecks + volumes
-2. Профиль `monitoring` (Prometheus + Grafana + cAdvisor + node-exporter) + provisioning дашбордов
-3. Профиль `orchestration` (Airflow) + пример DAG
-4. Профиль `viz` (Superset) + подключение к обеим базам
-5. Профиль `ai` (Qdrant)
-6. Alertmanager + базовые правила + webhook
-7. Traefik/Nginx как единый вход
-8. Makefile, .env.example, README, архитектурная диаграмма
-9. GitLab CI: lint + smoke test
-10. Первые runbooks в docs/
-
----
-
-## Связь с остальными проектами
-
-- **Проект №2 (GitLab CI + dbt)** → dbt-модели работают поверх ClickHouse/PostgreSQL из этого стека, pipeline в `.gitlab-ci.yml`
-- **Проект №3 (Runbook-агент)** → регламенты из `docs/runbooks/` индексируются в Qdrant из профиля `ai`
-- **Проект №4 (Text-to-SQL)** → запросы к ClickHouse/PostgreSQL, схемы из `init/`
-- **Проект №5 (AIOps)** → Alertmanager шлёт webhook, Prometheus даёт метрики, Qdrant даёт контекст из runbooks
+- **Проект №2 (GitLab CI + dbt)** → dbt-модели из этого проекта переносятся
+  в корпоративный GitLab, обвязываются полным CI/CD pipeline (lint → test →
+  staging → prod). Здесь у нас прообраз, там — полноценная реализация.
+- **Проект №3 (Runbook-агент с RAG)** → регламенты из `docs/runbooks/`
+  индексируются в Qdrant. Агент отвечает на «что делать если X сломалось».
+- **Проект №4 (Text-to-SQL бот)** → бот делает запросы к Gold-витринам
+  ClickHouse. Schema из этого проекта — обучающий контекст для LLM.
+- **Проект №5 (AIOps-lite)** → Alertmanager шлёт webhook в n8n, LLM
+  анализирует с использованием RAG из проекта №3 и метрик из этого стека.
