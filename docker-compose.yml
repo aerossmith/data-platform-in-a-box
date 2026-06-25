@@ -3,12 +3,59 @@ name: dpib
 # ============================================================
 # Data Platform in a Box
 # Профили:
-#   core          — PostgreSQL + ClickHouse (фундамент)
-#   monitoring    — Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter
-#   orchestration — Airflow (шаг 3)
-#   viz           — Superset (шаг 4)
-#   ai            — Qdrant (шаг 5)
+#   core          — PostgreSQL + ClickHouse + Redis
+#   monitoring    — Prometheus + Grafana + Alertmanager + exporters
+#   orchestration — Airflow 3.x с CeleryExecutor
+#   viz           — Superset (шаг 5)
+#   ai            — Qdrant (шаг 7)
 # ============================================================
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.0.3-python3.12
+  profiles: ["orchestration"]
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # SimpleAuthManager в режиме anonymous-admin — заходишь в UI, сразу админ.
+    # Идеально для лабы. В проде использовать FabAuthManager/KeycloakAuthManager.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-dpib-jwt-secret-change-me}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_pass@postgres:5432/airflow_meta
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow_pass@postgres:5432/airflow_meta
+    # Для локального стенда 16 prefork-процессов по умолчанию не помещаются в 1 GB.
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: "2"
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    DPIB_CLICKHOUSE_HOST: clickhouse
+    DPIB_CLICKHOUSE_PORT: "8123"
+    DPIB_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-dpib}
+    DPIB_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dpib_pass}
+    DPIB_CLICKHOUSE_DB: ${CLICKHOUSE_DB:-dpib}
+    DPIB_HH_IMPERSONATE: ${DPIB_HH_IMPERSONATE:-chrome120}
+    DPIB_HH_HTML_FALLBACK_MAX_PAGES: ${DPIB_HH_HTML_FALLBACK_MAX_PAGES:-5}
+    DPIB_HH_FETCH_DETAILS: ${DPIB_HH_FETCH_DETAILS:-true}
+    DPIB_HH_DETAIL_MAX_PER_COMBO: ${DPIB_HH_DETAIL_MAX_PER_COMBO:-100}
+    DPIB_HH_DETAIL_PAUSE_MIN_SEC: ${DPIB_HH_DETAIL_PAUSE_MIN_SEC:-0.2}
+    DPIB_HH_DETAIL_PAUSE_MAX_SEC: ${DPIB_HH_DETAIL_PAUSE_MAX_SEC:-0.6}
+    # curl-cffi нужен для обхода ddos-guard перед HH (имперсонация TLS Chrome).
+    _PIP_ADDITIONAL_REQUIREMENTS: "clickhouse-connect==0.7.19 requests==2.32.4 curl-cffi==0.7.4 beautifulsoup4==4.13.4"
+  volumes:
+    - ./orchestration/dags:/opt/airflow/dags
+    - ./orchestration/plugins:/opt/airflow/plugins
+    - ./orchestration/logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends
+    postgres:
+      condition: service_healthy
+      required: false
+    redis:
+      condition: service_healthy
+      required: false
+  networks:
+    - dpib_net
+
 
 services:
 
@@ -44,9 +91,6 @@ services:
     container_name: dpib-clickhouse
     profiles: ["core"]
     restart: unless-stopped
-    # SYS_NICE нужен для memory affinity (mempolicy syscalls).
-    # Без него ClickHouse спамит "Operation not permitted" на ограниченных хостах
-    # (GitHub Actions runners и т.п.), что замедляет старт и плодит шум в логах.
     cap_add:
       - SYS_NICE
     environment:
@@ -68,12 +112,30 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 40s
+      start_period: 60s
     mem_limit: 2g
+    networks:
+      - dpib_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: dpib-redis
+    profiles: ["core"]
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
     networks:
       - dpib_net
 
@@ -199,17 +261,99 @@ services:
       - dpib_net
 
 
-# ============================================================
-# Сеть
-# ============================================================
+  # ========== ORCHESTRATION (Airflow 3.x + Celery) ==========
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: dpib-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        echo "===> airflow db migrate"
+        airflow db migrate
+        echo "===> init complete"
+    restart: "no"
+    mem_limit: 512m
+
+  airflow-api-server:
+    <<: *airflow-common
+    container_name: dpib-airflow-api-server
+    command: api-server
+    ports:
+      - "${AIRFLOW_UI_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: 1g
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: dpib-airflow-scheduler
+    command: scheduler
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: 768m
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: dpib-airflow-dag-processor
+    command: dag-processor
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: 512m
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: dpib-airflow-triggerer
+    command: triggerer
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+    mem_limit: 512m
+
+  airflow-worker:
+    <<: *airflow-common
+    container_name: dpib-airflow-worker
+    command: celery worker
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_healthy
+    mem_limit: 1g
+
+
 networks:
   dpib_net:
     name: dpib_net
     driver: bridge
 
-# ============================================================
-# Тома (persist данных)
-# ============================================================
 volumes:
   postgres_data:
     name: dpib_postgres_data
@@ -217,6 +361,8 @@ volumes:
     name: dpib_clickhouse_data
   clickhouse_logs:
     name: dpib_clickhouse_logs
+  redis_data:
+    name: dpib_redis_data
   prometheus_data:
     name: dpib_prometheus_data
   grafana_data:

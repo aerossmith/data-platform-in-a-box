@@ -1,0 +1,20 @@
+# ============================================================
+# Доп. Python-пакеты для Airflow контейнеров.
+# Устанавливаются через _PIP_ADDITIONAL_REQUIREMENTS при первом старте.
+# В проде так делать НЕ надо — собирать кастомный образ.
+# ============================================================
+
+# HTTP-клиент для ClickHouse (официальный)
+clickhouse-connect==0.7.19
+
+# curl_cffi — имперсонация TLS-fingerprint Chrome через libcurl-impersonate.
+# Нужно потому что hh.ru/api.hh.ru закрыты ddos-guard, который режет
+# по TLS fingerprint (JA3/JA4), а не только по User-Agent.
+# requests-библиотека имеет узнаваемый Python TLS fingerprint и блокируется.
+curl-cffi==0.7.4
+
+# HTML fallback: парсинг карточек поиска, если публичный API источника вернул 401/403.
+beautifulsoup4==4.13.4
+
+# Fallback на случай если где-то нужен обычный requests
+requests==2.32.4

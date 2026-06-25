@@ -1,0 +1,40 @@
+name: 'dpib_hh'
+version: '1.0.0'
+config-version: 2
+
+profile: 'dpib_dbt'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# ----------------------------------------------------------------
+# Materializations per layer
+#
+# Всё хранится в одной ClickHouse БД `dpib` (как и bronze), модели
+# различаются по префиксу: stg_*, silver_*, gold_*. Это упрощает
+# работу из чужих клиентов (Grafana, Superset, dbeaver) — одна БД,
+# одни креды.
+# ----------------------------------------------------------------
+models:
+  dpib_hh:
+    staging:
+      +materialized: view
+      +schema: dpib
+    silver:
+      +materialized: table
+      +schema: dpib
+      +engine: 'MergeTree'
+      +order_by: '(snapshot_id, vacancy_id)'
+    gold:
+      +materialized: table
+      +schema: dpib
+      +engine: 'MergeTree'

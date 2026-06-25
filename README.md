@@ -1,8 +1,10 @@
 # Data Platform in a Box
 
-![CI](https://github.com/REPLACE_WITH_YOUR_LOGIN/data-platform-in-a-box/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/aerossmith/data-platform-in-a-box/actions/workflows/ci.yml/badge.svg)
 
-Локальная DWH/BI платформа в Docker Compose — единый стек для аналитики и фундамент для AI/DevOps-проектов.
+Локальная DWH/BI платформа в Docker Compose — единый стек для аналитики
+и фундамент для AI/DevOps-проектов. С реальными данными (HH.ru вакансии),
+медальонной архитектурой и one-command demo.
 
 Подробный план: [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).
 
@@ -10,15 +12,18 @@
 
 ## Текущий статус
 
-**Шаг 2 из 10: профили `core` + `monitoring`** ✅
+**Шаг 3 из 10: добавлен профиль `orchestration` (Airflow 3.x + Celery)** 🔥
 
-- `core` — PostgreSQL 16, ClickHouse 24
-- `monitoring` — Prometheus, Grafana, Alertmanager, node-exporter, cAdvisor, postgres-exporter
-- Включены встроенные prometheus-метрики ClickHouse
-- Готовый дашборд DPIB Overview + базовые алерты
+Готово:
+
+- `core` — PostgreSQL 16 + ClickHouse 24 + Redis 7
+- `monitoring` — Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter
+- `orchestration` — Airflow 3.x с CeleryExecutor (api-server + scheduler + dag-processor + triggerer + worker)
+- Первый DAG: `hh_vacancies_snapshot` (HH.ru → bronze в ClickHouse, каждые 4 часа)
+- Bronze-слой в ClickHouse под медальонную архитектуру
 - GitHub Actions CI: статический lint (compose / YAML / XML / JSON / SQL)
 
-Дальше по плану: оркестрация (Airflow) → визуализация (Superset) → AI-слой (Qdrant).
+Дальше: dbt → Superset → `make demo` → AI-слой.
 
 ---
 
@@ -26,81 +31,76 @@
 
 ### Требования
 
-- Docker Desktop с включённой WSL-интеграцией (Windows) или Docker Engine (Linux)
+- Docker Desktop (Windows/macOS) или Docker Engine (Linux)
 - Make
-- ~5–6 GB свободной RAM для `core` + `monitoring`
+- RAM: ~5 GB для `core+monitoring`, ~9 GB для полного стека с Airflow
 
 ### Запуск
 
 ```bash
 cp .env.example .env
 
-# поднять core + monitoring (рекомендуется)
+# базовый стек (БД + Redis + мониторинг)
 make up PROFILES="core monitoring"
 
-# или только базы
-make up PROFILES="core"
+# + Airflow
+make up PROFILES="core monitoring orchestration"
 
 # проверить
 make status
 ```
 
-Через 20–30 секунд все контейнеры должны быть в статусе `Up` / `healthy`.
+Первый старт Airflow занимает 2-3 минуты — нужно проинициализировать БД
+и подтянуть `clickhouse-connect` через `_PIP_ADDITIONAL_REQUIREMENTS`.
 
 ### Что доступно
 
 | Сервис         | URL / адрес                  | Учётка                          |
 |---------------|------------------------------|---------------------------------|
-| PostgreSQL    | `localhost:5432`             | `dpib` / `dpib_pass`            |
+| PostgreSQL    | `localhost:5432`             | `dpib` / `dpib_pass` (БД `dpib`) |
 | ClickHouse    | http://localhost:8123        | `dpib` / `dpib_pass`            |
+| Redis         | `localhost:6379`             | без пароля                      |
 | Prometheus    | http://localhost:9090        | без авторизации                 |
 | Grafana       | http://localhost:3000        | `admin` / `admin`               |
 | Alertmanager  | http://localhost:9093        | без авторизации                 |
-| ClickHouse metrics | http://localhost:9363/metrics | без авторизации            |
+| **Airflow UI**| http://localhost:8080        | `admin` / `admin`               |
 
-### Проверки
+### Проверка работы DAG
 
 ```bash
-# дашборд DPIB Overview подтянется автоматически в папке "DPIB"
-open http://localhost:3000
+make airflow-list-dags                              # должен показать hh_vacancies_snapshot
+make airflow-trigger DAG=hh_vacancies_snapshot      # запустить вручную (не дожидаясь расписания)
+make airflow-logs                                   # tail логов всех Airflow-сервисов
 
-# Prometheus — посмотреть targets
-open http://localhost:9090/targets   # все должны быть UP
-
-# тестовые данные в БД
-make psql                # → SELECT * FROM analytics.users;
-make clickhouse-cli      # → SELECT * FROM events_analytics;
+# проверить, что вакансии пришли в bronze
+make clickhouse-cli
+# > SELECT count() FROM bronze_hh_vacancies;
+# > SELECT search_text, search_area, count() FROM bronze_hh_vacancies GROUP BY 1,2;
 ```
 
-### Импорт готовых дашбордов (рекомендуется)
+### HH ingest: API + HTML fallback
 
-В Grafana → Dashboards → New → Import → ввести ID:
+`hh_vacancies_snapshot` сначала пробует публичный API HH. Если API возвращает `401/403`, DAG не уходит в пустой
+зелёный `skip`, а переключается на HTML fallback по странице поиска и пишет найденные карточки в
+`bronze_hh_vacancies.raw_json` с `source_mode="html_fallback"`.
 
-| ID    | Что                              |
-|-------|----------------------------------|
-| 1860  | Node Exporter Full               |
-| 14282 | cAdvisor (контейнеры)            |
-| 9628  | PostgreSQL Database              |
-| 14192 | ClickHouse (community)           |
-
-Datasource — `Prometheus` (уже добавлен через provisioning).
+Проектные детали: [`orchestration/README.md`](./orchestration/README.md).
+Обезличенный операционный сценарий: [`runbooks/external-api-blocked-html-fallback.md`](./runbooks/external-api-blocked-html-fallback.md).
 
 ---
 
 ## Полезные команды
 
 ```bash
-make help                              # список всех команд
-make up PROFILES="core monitoring"     # старт
-make up PROFILES="core"                # только базы
-make down PROFILES="core monitoring"   # стоп
-make status                            # статусы
-make logs                              # логи всех
-make logs SVC=prometheus               # логи одного сервиса
-make restart                           # перезапуск
-make psql                              # клиент PostgreSQL
-make clickhouse-cli                    # клиент ClickHouse
-make reset                             # ОПАСНО: удалит тома и данные
+make help                                            # список всех команд
+make up PROFILES="core monitoring orchestration"     # полный стек
+make down PROFILES="core monitoring orchestration"   # стоп
+make status                                          # статусы
+make logs SVC=clickhouse                             # логи одного сервиса
+make airflow-logs                                    # tail Airflow (scheduler+worker+dag-processor)
+make psql / clickhouse-cli / redis-cli               # клиенты БД
+make airflow-trigger DAG=...                         # запуск DAG вручную
+make reset                                           # ОПАСНО: удалит тома и данные
 ```
 
 ---
@@ -109,28 +109,31 @@ make reset                             # ОПАСНО: удалит тома и 
 
 ```
 data-platform-in-a-box/
-├── .github/workflows/ci.yml            ← GitHub Actions: статические проверки
+├── .github/workflows/ci.yml            ← GitHub Actions: статический lint
 ├── docker-compose.yml
 ├── .env.example
 ├── Makefile
 ├── README.md
 ├── PROJECT_PLAN.md
 ├── init/
-│   ├── postgres/01_init.sql
-│   └── clickhouse/01_init.sql
+│   ├── postgres/
+│   │   ├── 01_init.sql                 ← analytics-схема + тестовые данные
+│   │   └── 02_airflow.sql              ← БД airflow_meta + пользователь
+│   └── clickhouse/
+│       ├── 01_init.sql                 ← events_analytics (демо)
+│       └── 02_bronze_schema.sql        ← bronze_hh_vacancies, bronze_hh_employers
 ├── config/
-│   ├── clickhouse/
-│   │   ├── prometheus.xml              ← включает метрики
-│   │   └── network.xml                 ← listen_host = 0.0.0.0
-│   ├── prometheus/
-│   │   ├── prometheus.yml              ← targets для скрапинга
-│   │   └── alerts.yml                  ← правила алертов
+│   ├── clickhouse/{prometheus.xml, network.xml}
+│   ├── prometheus/{prometheus.yml, alerts.yml}
 │   ├── alertmanager/alertmanager.yml
-│   └── grafana/
-│       ├── provisioning/
-│       │   ├── datasources/datasources.yml
-│       │   └── dashboards/dashboards.yml
-│       └── dashboards/dpib-overview.json
+│   └── grafana/{provisioning, dashboards}
+├── orchestration/                      ← новый каталог (шаг 3)
+│   ├── README.md
+│   ├── requirements.txt                ← clickhouse-connect, requests
+│   ├── dags/
+│   │   └── hh_vacancies_snapshot.py    ← snapshot HH.ru → bronze
+│   ├── plugins/
+│   └── logs/
 └── docs/                               ← TBD: runbooks для будущего RAG
 ```
 
@@ -145,40 +148,24 @@ data-platform-in-a-box/
 | postgres-exporter  | подключения, размер БД, репликация, locks           |
 | ClickHouse `:9363` | parts, merges, query duration, replication queue    |
 
-### Базовые алерты (config/prometheus/alerts.yml)
-
-- ServiceDown (любой сервис недоступен > 1 минуты)
-- HighCpuUsage / HighMemoryUsage / DiskSpaceLow на хосте
-- PostgresDown / PostgresTooManyConnections
-- ClickHouseTooManyParts / ClickHouseReplicationLag
-
-Сейчас алерты идут в null-receiver Alertmanager (видны только в UI). В шаге №5 (AIOps) подключим webhook в n8n → LLM → Telegram.
+Базовые алерты в `config/prometheus/alerts.yml`. В шаге AIOps (этап 8)
+подключим webhook в n8n → LLM → Telegram.
 
 ---
 
 ## CI / CD
 
-На каждый push в `main` и каждый pull request запускается pipeline в GitHub Actions.
-Только статические проверки — без подъёма контейнеров, прогон занимает 20–30 секунд:
+На каждый push в `main` и каждый pull request — статический lint:
+`docker compose config`, `yamllint`, `xmllint`, `jq empty`, `sqlfluff`.
 
-| Что проверяем                       | Чем                       |
-|------------------------------------|---------------------------|
-| Синтаксис docker-compose.yml       | `docker compose config`   |
-| YAML-конфиги (Prometheus, Grafana) | `yamllint`                |
-| XML-конфиги ClickHouse             | `xmllint`                 |
-| JSON дашбордов Grafana             | `jq empty`                |
-| SQL init-скрипты (style, warn-only)| `sqlfluff`                |
-
-Smoke-тест с поднятием стека и проверкой данных делается локально через `make up` —
-для CI он избыточен и капризен на shared-раннерах (ClickHouse healthcheck в Alpine
-ругается на capabilities). Если понадобится — есть `workflow_dispatch` для ручного запуска.
-
-Статус — в бейджике в начале README.
+Без подъёма контейнеров, ~20–30 секунд. Smoke-тест локально через `make up`.
 
 ---
 
 ## Что дальше
 
-**Шаг 3** — Airflow для оркестрации. Готовый DAG, который перекладывает данные из PostgreSQL в ClickHouse через staging. База для будущего dbt-pipeline.
+**Шаг 4** — dbt для трансформаций bronze → silver → gold + тесты качества данных.
+Будут готовые gold-витрины (медианы зарплат, топ-навыки, активные работодатели)
+поверх данных, которые уже льются через Airflow.
 
 Полный план — в [`PROJECT_PLAN.md`](./PROJECT_PLAN.md).

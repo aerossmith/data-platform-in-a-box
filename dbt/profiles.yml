@@ -1,0 +1,33 @@
+# ----------------------------------------------------------------
+# dbt profile для подключения к ClickHouse
+#
+# По умолчанию подключается к localhost:8123 — это работает когда
+# dbt запускается из WSL/хоста (ClickHouse порт уже наружу торчит).
+#
+# Если запускать dbt внутри Docker-сети dpib (через будущий
+# dbt-runner контейнер) — переопредели DBT_CH_HOST=clickhouse.
+#
+# Чтобы dbt нашёл этот файл, либо запускай из ./dbt/ командой
+#   dbt run --profiles-dir .
+# либо положи копию в ~/.dbt/profiles.yml
+# ----------------------------------------------------------------
+
+dpib_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: clickhouse
+      schema: "{{ env_var('DBT_CH_SCHEMA', 'dpib') }}"
+      host: "{{ env_var('DBT_CH_HOST', 'localhost') }}"
+      port: "{{ env_var('DBT_CH_PORT', '8123') | int }}"
+      user: "{{ env_var('DBT_CH_USER', 'dpib') }}"
+      password: "{{ env_var('DBT_CH_PASSWORD', 'dpib_pass') }}"
+      driver: http
+      secure: False
+      verify: False
+      connect_timeout: 10
+      send_receive_timeout: 300
+      threads: 4
+      # ClickHouse-специфика
+      use_lw_deletes: False
+      check_exchange: False

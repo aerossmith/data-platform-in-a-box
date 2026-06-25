@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: silver_hh_vacancies
+    description: >
+      Чистая таблица вакансий: dedup по (snapshot_id, vacancy_id) с выбором
+      лучшей по качеству строки (detail_status='ok' > captcha > html > api).
+      Дополнительно — массивы matched_roles / matched_areas (под какие поиски
+      вакансия попала в этом снапшоте).
+
+      Grain: (snapshot_id, vacancy_id).
+      Не latest и не distinct по vacancy_id — это в gold_vacancies_latest.
+    columns:
+      - name: snapshot_id
+        tests:
+          - not_null
+      - name: vacancy_id
+        tests:
+          - not_null
+      - name: title
+        tests:
+          - not_null
+      - name: source_mode
+        tests:
+          - not_null
+
+    # Композитный unique через dbt_utils
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - snapshot_id
+            - vacancy_id
