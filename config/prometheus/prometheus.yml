@@ -1,6 +1,5 @@
 # ============================================================
 # Prometheus — основной конфиг
-# Скрапит метрики со всех компонентов стека
 # ============================================================
 
 global:
@@ -9,46 +8,53 @@ global:
   external_labels:
     monitor: dpib
 
-# Подключаем правила алертов
 rule_files:
   - /etc/prometheus/alerts.yml
 
-# Куда отправлять алерты
 alerting:
   alertmanagers:
     - static_configs:
         - targets:
             - alertmanager:9093
 
-# Что мониторим
 scrape_configs:
 
-  # сам Prometheus
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
 
-  # метрики хоста (CPU, RAM, диск, сеть)
   - job_name: node
     static_configs:
       - targets: ["node-exporter:9100"]
 
-  # метрики контейнеров (Docker)
   - job_name: cadvisor
     static_configs:
       - targets: ["cadvisor:8080"]
 
-  # PostgreSQL — через postgres-exporter
   - job_name: postgres
     static_configs:
       - targets: ["postgres-exporter:9187"]
 
-  # ClickHouse — встроенный эндпоинт
+  # ClickHouse — встроенный эндпоинт /metrics на порту 9363.
+  # Отдаёт: query_duration, inserted_rows, parts, merges,
+  # replication_queue, memory_usage, connections и др.
   - job_name: clickhouse
     static_configs:
       - targets: ["clickhouse:9363"]
 
-  # Alertmanager (мониторим сам мониторинг)
   - job_name: alertmanager
     static_configs:
       - targets: ["alertmanager:9093"]
+
+  # Airflow через StatsD exporter.
+  # Airflow шлёт UDP-метрики на statsd-exporter:9125,
+  # exporter переводит их в Prometheus-формат на :9102.
+  # Ключевые метрики:
+  #   airflow_dag_processing_total_parse_time
+  #   airflow_dagrun_duration_success_*
+  #   airflow_operator_failures_*
+  #   airflow_operator_successes_*
+  #   airflow_celery_*
+  - job_name: airflow
+    static_configs:
+      - targets: ["statsd-exporter:9102"]

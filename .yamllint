@@ -1,0 +1,13 @@
+---
+extends: default
+
+rules:
+  # docker-compose комментарии и длинные env-строки не помещаются в 80 символов
+  line-length:
+    max: 150
+    level: warning
+  # --- в начале файла опционально для конфигов
+  document-start: disable
+  # комментарии с пробелом перед текстом
+  comments:
+    min-spaces-from-content: 1

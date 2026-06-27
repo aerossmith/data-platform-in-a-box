@@ -6,8 +6,6 @@ name: dpib
 #   core          — PostgreSQL + ClickHouse + Redis
 #   monitoring    — Prometheus + Grafana + Alertmanager + exporters
 #   orchestration — Airflow 3.x с CeleryExecutor
-#   viz           — Superset (шаг 5)
-#   ai            — Qdrant (шаг 7)
 # ============================================================
 
 x-airflow-common: &airflow-common
@@ -16,8 +14,6 @@ x-airflow-common: &airflow-common
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    # SimpleAuthManager в режиме anonymous-admin — заходишь в UI, сразу админ.
-    # Идеально для лабы. В проде использовать FabAuthManager/KeycloakAuthManager.
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=}
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-dpib-jwt-secret-change-me}
@@ -25,26 +21,35 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow_pass@postgres:5432/airflow_meta
-    # Для локального стенда 16 prefork-процессов по умолчанию не помещаются в 1 GB.
     AIRFLOW__CELERY__WORKER_CONCURRENCY: "2"
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    # ---- Метрики Airflow → StatsD → Prometheus ----
+    AIRFLOW__METRICS__STATSD_ON: "true"
+    AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow
+    # ---- ClickHouse (используется и DAG-ами и dbt через profiles.yml) ----
     DPIB_CLICKHOUSE_HOST: clickhouse
     DPIB_CLICKHOUSE_PORT: "8123"
     DPIB_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-dpib}
     DPIB_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dpib_pass}
     DPIB_CLICKHOUSE_DB: ${CLICKHOUSE_DB:-dpib}
-    DPIB_HH_IMPERSONATE: ${DPIB_HH_IMPERSONATE:-chrome120}
-    DPIB_HH_HTML_FALLBACK_MAX_PAGES: ${DPIB_HH_HTML_FALLBACK_MAX_PAGES:-5}
-    DPIB_HH_FETCH_DETAILS: ${DPIB_HH_FETCH_DETAILS:-true}
-    DPIB_HH_DETAIL_MAX_PER_COMBO: ${DPIB_HH_DETAIL_MAX_PER_COMBO:-100}
-    DPIB_HH_DETAIL_PAUSE_MIN_SEC: ${DPIB_HH_DETAIL_PAUSE_MIN_SEC:-0.2}
-    DPIB_HH_DETAIL_PAUSE_MAX_SEC: ${DPIB_HH_DETAIL_PAUSE_MAX_SEC:-0.6}
-    # curl-cffi нужен для обхода ddos-guard перед HH (имперсонация TLS Chrome).
-    _PIP_ADDITIONAL_REQUIREMENTS: "clickhouse-connect==0.7.19 requests==2.32.4 curl-cffi==0.7.4 beautifulsoup4==4.13.4"
+    # ---- Пакеты при старте ----
+    # beautifulsoup4 — HTML-парсинг вакансий (hh_vacancies_snapshot)
+    # curl-cffi      — TLS-имперсонация Chrome для обхода ddos-guard
+    # dbt-core + dbt-clickhouse — трансформации в dbt_hh_transform
+    _PIP_ADDITIONAL_REQUIREMENTS: >-
+      clickhouse-connect==0.7.19
+      requests==2.32.4
+      curl-cffi==0.7.4
+      beautifulsoup4==4.12.3
+      dbt-core==1.8.9
+      dbt-clickhouse==1.8.9
   volumes:
     - ./orchestration/dags:/opt/airflow/dags
     - ./orchestration/plugins:/opt/airflow/plugins
     - ./orchestration/logs:/opt/airflow/logs
+    - ./dbt:/opt/airflow/dbt:ro
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends
     postgres:
@@ -256,6 +261,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 64m
+    networks:
+      - dpib_net
+
+  # StatsD exporter: принимает UDP-метрики от Airflow (порт 9125)
+  # и отдаёт их Prometheus в формате /metrics (порт 9102).
+  # Airflow шлёт сюда dag_duration, task_duration, operator_failures,
+  # celery worker heartbeat и десятки других метрик.
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.27.1
+    container_name: dpib-statsd-exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "9125:9125/udp"   # приём от Airflow
+      - "9102:9102"       # Prometheus scrape
     mem_limit: 64m
     networks:
       - dpib_net
