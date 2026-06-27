@@ -10,7 +10,8 @@ PROFILES ?= core
 PROFILE_FLAGS := $(foreach p,$(PROFILES),--profile $(p))
 
 .PHONY: help up down restart status logs ps clean reset psql clickhouse-cli redis-cli \
-        airflow-shell airflow-logs airflow-trigger airflow-list-dags airflow-bootstrap
+        airflow-shell airflow-logs airflow-trigger airflow-list-dags airflow-bootstrap \
+        clickhouse-bootstrap
 
 help:  ## показать список команд
 	@echo "Data Platform in a Box"
@@ -91,3 +92,12 @@ airflow-bootstrap:  ## создать user+db airflow в существующе�
 	@echo ""
 	@echo "Готово. Теперь пересоздай Airflow контейнеры:"
 	@echo "  docker compose --profile orchestration up -d --force-recreate"
+
+clickhouse-bootstrap:  ## создать БД dpib_silver+dpib_gold в работающем ClickHouse (если том уже был)
+	@echo "Применяю init/clickhouse/03_create_databases.sql к работающему ClickHouse..."
+	docker exec -i dpib-clickhouse clickhouse-client \
+		--user $${CLICKHOUSE_USER:-dpib} \
+		--password $${CLICKHOUSE_PASSWORD:-dpib_pass} \
+		--multiquery < init/clickhouse/03_create_databases.sql
+	@echo ""
+	@echo "Готово. Проверь: docker exec dpib-clickhouse clickhouse-client --query 'SHOW DATABASES'"

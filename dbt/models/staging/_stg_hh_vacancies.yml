@@ -4,47 +4,49 @@ models:
   - name: stg_hh_vacancies
     description: >
       Унифицированный staging-слой над bronze_hh_vacancies. Парсит raw_json
-      в типизированные колонки независимо от source_mode (HTML fallback / API).
+      в типизированные колонки независимо от source_mode (HTML fallback или API).
       Один к одному с bronze: grain (snapshot_id, search_text, search_area,
       vacancy_id, page_num). Дедупликации тут нет — это в silver.
     columns:
       - name: snapshot_id
-        description: UUID запуска DAG
+        description: "UUID запуска DAG"
         tests:
           - not_null
       - name: vacancy_id
-        description: ID вакансии на HH. НЕ уникален в этой view.
+        description: "ID вакансии на HH. НЕ уникален в этой view."
         tests:
           - not_null
       - name: search_text
+        description: "Текст запроса (роль)"
         tests:
           - not_null
           - accepted_values:
               values: ['DevOps Engineer', 'Platform Engineer']
       - name: search_area
+        description: "Региональный срез"
         tests:
           - not_null
           - accepted_values:
               values: ['msk', 'spb', 'remote']
       - name: source_mode
-        description: 'html_fallback' / 'api' (по умолчанию 'api' если в payload пусто)
+        description: "html_fallback или api (по умолчанию api если в payload пусто)"
         tests:
           - not_null
           - accepted_values:
               values: ['html_fallback', 'api']
       - name: detail_status
-        description: 'ok' / 'captcha' / 'error' / 'http_XXX' / 'not_fetched_limit' / 'disabled' / NULL
-        # без accepted_values: HH может присылать новые статусы (http_429 и т.п.)
+        description: "ok, captcha, error, http_XXX, not_fetched_limit, disabled или NULL"
       - name: title
+        description: "Название вакансии"
         tests:
           - not_null
       - name: quality_score
-        description: 4=detail ok, 3=captcha, 2=html, 1=api, 0=unknown
+        description: "4 — detail ok, 3 — captcha, 2 — html, 1 — api, 0 — unknown"
         tests:
           - not_null
           - accepted_values:
               values: [0, 1, 2, 3, 4]
       - name: skills
-        description: Массив навыков из detail-страницы. Часто пустой ([]).
+        description: "Массив навыков из detail-страницы. Часто пустой."
       - name: has_detail
-        description: Удобный флаг — пришёл ли полный detail-payload
+        description: "Флаг — пришёл ли полный detail-payload (source_mode=html_fallback и detail_status=ok)"

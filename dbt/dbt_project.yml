@@ -17,24 +17,29 @@ clean-targets:
   - "dbt_packages"
 
 # ----------------------------------------------------------------
-# Materializations per layer
+# Materializations и базы данных под каждый слой
 #
-# Всё хранится в одной ClickHouse БД `dpib` (как и bronze), модели
-# различаются по префиксу: stg_*, silver_*, gold_*. Это упрощает
-# работу из чужих клиентов (Grafana, Superset, dbeaver) — одна БД,
-# одни креды.
+# Медальонная архитектура — три отдельные базы в ClickHouse:
+#   dpib         — bronze (исходные данные из ingest-DAG)
+#   dpib_silver  — staging + silver (нормализация и dedup)
+#   dpib_gold    — gold (витрины под потребителей)
+#
+# Базы должны существовать заранее. Создаются:
+#   - автоматически при первом старте ClickHouse через init-скрипт
+#     init/clickhouse/03_create_databases.sql;
+#   - вручную для уже работающего контейнера: `make clickhouse-bootstrap`.
 # ----------------------------------------------------------------
 models:
   dpib_hh:
     staging:
       +materialized: view
-      +schema: dpib
+      +schema: silver        # staging живёт рядом с silver (это его подготовка)
     silver:
       +materialized: table
-      +schema: dpib
+      +schema: silver
       +engine: 'MergeTree'
       +order_by: '(snapshot_id, vacancy_id)'
     gold:
       +materialized: table
-      +schema: dpib
+      +schema: gold
       +engine: 'MergeTree'

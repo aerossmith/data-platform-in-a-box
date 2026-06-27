@@ -1,24 +1,37 @@
 # dbt — трансформации bronze → silver → gold
 
 dbt-проект поверх `dpib.bronze_hh_vacancies` (ClickHouse).
-Не трогает ingest, не меняет docker-compose — только читает bronze и пишет staging/silver/gold модели в ту же БД `dpib`.
+Не трогает ingest, не меняет docker-compose — только читает bronze и пишет
+модели в отдельные базы `dpib_silver` и `dpib_gold`.
 
-## Слои
+## Раскладка по базам в ClickHouse
+
+| База | Что внутри | Кто пишет |
+|---|---|---|
+| `dpib`        | `bronze_hh_vacancies`, прикладные таблицы | DAG `hh_vacancies_snapshot` |
+| `dpib_silver` | `stg_hh_vacancies` (view), `silver_hh_vacancies` (table) | dbt (этот проект) |
+| `dpib_gold`   | `gold_skills_top`, остальные витрины | dbt (этот проект) |
+
+Базы `dpib_silver` и `dpib_gold` создаются:
+- автоматически при первом старте ClickHouse через `init/clickhouse/03_create_databases.sql`;
+- вручную для уже работающего контейнера: `make clickhouse-bootstrap` (из корня репозитория).
+
+## Поток данных
 
 ```
-bronze_hh_vacancies  ← append-only, raw_json (НЕ ТРОГАЕМ)
+bronze_hh_vacancies          dpib            (append-only, raw_json, не трогаем)
         ↓
-stg_hh_vacancies     ← view, парсит raw_json, унифицирует API + HTML payload
+stg_hh_vacancies             dpib_silver     (view, парсит raw_json, унифицирует payload)
         ↓
-silver_hh_vacancies  ← table, dedup по (snapshot_id, vacancy_id), best-row
+silver_hh_vacancies          dpib_silver     (table, dedup по (snapshot_id, vacancy_id))
         ↓
-gold_skills_top      ← топ навыков по latest snapshot of each vacancy
+gold_skills_top              dpib_gold       (топ навыков по latest snapshot)
 ```
 
 ## Установка (один раз)
 
 ```bash
-# Из WSL/Ubuntu внутри $REPO_ROOT
+# Из WSL внутри корня репозитория
 cd dbt
 
 python3 -m venv .venv
@@ -26,7 +39,7 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install dbt-core==1.8.* dbt-clickhouse==1.8.*
 
-# Установить зависимости (dbt_utils)
+# Зависимости (dbt_utils для composite-unique теста)
 dbt deps --profiles-dir .
 ```
 
@@ -36,8 +49,12 @@ dbt deps --profiles-dir .
 cd dbt
 source .venv/bin/activate
 
-# Конфиг по умолчанию: localhost:8123, user=dpib, pass=dpib_pass.
-# Если что-то другое — переопредели:
+# Если базы dpib_silver/dpib_gold ещё не созданы (старый том ClickHouse):
+#   из корня репозитория сначала
+make clickhouse-bootstrap
+
+# Профиль по умолчанию: localhost:8123, user=dpib, pass=dpib_pass.
+# При желании переопредели:
 #   export DBT_CH_HOST=...  DBT_CH_PASSWORD=...
 
 # Проверка соединения
@@ -61,25 +78,30 @@ dbt run --profiles-dir . --select stg_hh_vacancies
 ```bash
 make clickhouse-cli
 ```
+
 ```sql
--- Smoke: всё ли поднялось
-SELECT count() FROM stg_hh_vacancies;
-SELECT count() FROM silver_hh_vacancies;
-SELECT count() FROM gold_skills_top;
+-- Smoke: всё ли поднялось в правильных базах
+SHOW DATABASES;
+SHOW TABLES FROM dpib_silver;
+SHOW TABLES FROM dpib_gold;
 
--- silver: dedup на месте?
+SELECT count() FROM dpib_silver.stg_hh_vacancies;
+SELECT count() FROM dpib_silver.silver_hh_vacancies;
+SELECT count() FROM dpib_gold.gold_skills_top;
+
+-- silver: соблюдён ли grain?
 SELECT count() AS rows, uniq((snapshot_id, vacancy_id)) AS unique_keys
-FROM silver_hh_vacancies;
--- rows == unique_keys → значит grain соблюдён
+FROM dpib_silver.silver_hh_vacancies;
+-- rows == unique_keys → grain (snapshot_id, vacancy_id) уникален
 
--- silver: распределение качества payload
+-- Распределение качества payload
 SELECT source_mode, detail_status, count()
-FROM silver_hh_vacancies
+FROM dpib_silver.silver_hh_vacancies
 GROUP BY 1, 2 ORDER BY 3 DESC;
 
 -- gold: топ-20 навыков
 SELECT skill, vacancies_count, devops_count, platform_count, remote_count
-FROM gold_skills_top
+FROM dpib_gold.gold_skills_top
 ORDER BY vacancies_count DESC
 LIMIT 20;
 ```
@@ -88,20 +110,22 @@ LIMIT 20;
 
 ```
 dbt/
-├── dbt_project.yml              ← проект, materializations per layer
+├── dbt_project.yml              ← проект, schema per layer (silver/gold)
 ├── profiles.yml                 ← подключение к ClickHouse через ENV
-├── packages.yml                 ← dbt_utils для composite unique
+├── packages.yml                 ← dbt_utils
+├── macros/
+│   └── generate_schema_name.sql ← маппинг "silver" → dpib_silver, "gold" → dpib_gold
 ├── models/
 │   ├── staging/
-│   │   ├── _sources.yml         ← декларация bronze.bronze_hh_vacancies + тесты
+│   │   ├── _sources.yml         ← bronze в базе dpib
 │   │   ├── _stg_hh_vacancies.yml
-│   │   └── stg_hh_vacancies.sql ← view: JSONExtract → типизированные колонки
+│   │   └── stg_hh_vacancies.sql ← view в dpib_silver
 │   ├── silver/
 │   │   ├── _silver_hh_vacancies.yml
-│   │   └── silver_hh_vacancies.sql ← table: dedup + matched_roles/areas
+│   │   └── silver_hh_vacancies.sql ← table в dpib_silver
 │   └── gold/
-│       └── gold_skills_top.sql  ← топ навыков по latest snapshot
-└── README.md                    ← вы здесь
+│       └── gold_skills_top.sql  ← table в dpib_gold
+└── README.md
 ```
 
 ## Что НЕ делаем на этом этапе
@@ -125,10 +149,11 @@ dbt/
 
 ## Технические заметки
 
-- ClickHouse `raw_json` хранится как `String` → используем `JSONExtractString`,
-  `JSONExtract(..., 'Array(String)')`, `JSONExtract(raw_json_subtree, 'field', 'Nullable(Int64)')`
-- Engine для silver: `MergeTree()` + partitioning по месяцам по `ingested_at`
-  (бэйз-сетап как в bronze, для retention позже добавим TTL)
-- materialized=`view` для staging — не плодим данные, читатели идут в silver
-- В `_sources.yml` source-схема указана как `dpib` (= БД), а не `bronze` —
-  потому что в нашей лабе всё в одной БД
+- В dbt-clickhouse `schema` мапится на ClickHouse database. Чтобы получить
+  именно `dpib_silver` / `dpib_gold` (а не дефолтный префикс `dpib_*`),
+  переопределён макрос `generate_schema_name` — см. `macros/`.
+- `raw_json` в bronze хранится как `String`, используем `JSONExtractString`,
+  `JSONExtract(..., 'Array(String)')`, и т.д.
+- Engine silver: `MergeTree()`, ключ `(snapshot_id, vacancy_id)`,
+  партиционирование по месяцам по `ingested_at`.
+- `materialized=view` для staging — не дублирует данные, читатели идут в silver.

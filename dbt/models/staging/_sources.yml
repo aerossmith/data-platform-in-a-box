@@ -5,7 +5,7 @@ sources:
     description: >
       Сырой слой — append-only снапшоты вакансий HH.ru.
       Записывается DAG `hh_vacancies_snapshot`. История не модифицируется.
-    database: dpib
+      Живёт в базе ClickHouse `dpib` (вместе с другими raw-источниками).
     schema: dpib
     tables:
       - name: bronze_hh_vacancies
