@@ -10,27 +10,27 @@ models:
     columns:
       - name: snapshot_id
         description: "UUID запуска DAG"
-        tests:
+        data_tests:
           - not_null
       - name: vacancy_id
         description: "ID вакансии на HH. НЕ уникален в этой view."
-        tests:
+        data_tests:
           - not_null
       - name: search_text
         description: "Текст запроса (роль)"
-        tests:
+        data_tests:
           - not_null
           - accepted_values:
               values: ['DevOps Engineer', 'Platform Engineer']
       - name: search_area
         description: "Региональный срез"
-        tests:
+        data_tests:
           - not_null
           - accepted_values:
               values: ['msk', 'spb', 'remote']
       - name: source_mode
         description: "html_fallback или api (по умолчанию api если в payload пусто)"
-        tests:
+        data_tests:
           - not_null
           - accepted_values:
               values: ['html_fallback', 'api']
@@ -38,15 +38,15 @@ models:
         description: "ok, captcha, error, http_XXX, not_fetched_limit, disabled или NULL"
       - name: title
         description: "Название вакансии"
-        tests:
+        data_tests:
           - not_null
       - name: quality_score
         description: "4 — detail ok, 3 — captcha, 2 — html, 1 — api, 0 — unknown"
-        tests:
+        data_tests:
           - not_null
           - accepted_values:
               values: [0, 1, 2, 3, 4]
       - name: skills
         description: "Массив навыков из detail-страницы. Часто пустой."
       - name: has_detail
-        description: "Флаг — пришёл ли полный detail-payload (source_mode=html_fallback и detail_status=ok)"
+        description: "Флаг — пришёл ли полный detail-payload"

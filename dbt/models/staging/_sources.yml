@@ -4,53 +4,51 @@ sources:
   - name: bronze
     description: >
       Сырой слой — append-only снапшоты вакансий HH.ru.
-      Записывается DAG `hh_vacancies_snapshot`. История не модифицируется.
-      Живёт в базе ClickHouse `dpib` (вместе с другими raw-источниками).
+      Записывается DAG hh_vacancies_snapshot. История не модифицируется.
+      Живёт в базе ClickHouse dpib.
     schema: dpib
     tables:
       - name: bronze_hh_vacancies
         description: >
-          Один логический grain — (snapshot_id, search_text, search_area, vacancy_id, page_num).
+          Grain: (snapshot_id, search_text, search_area, vacancy_id, page_num).
           Глобальный vacancy_id НЕ уникален — одна вакансия может попасть в выдачу
           по разным search_text/search_area или в разные снапшоты.
         columns:
           - name: ingested_at
             description: Момент вставки строки в ClickHouse
             data_type: DateTime
-            tests:
+            data_tests:
               - not_null
           - name: snapshot_id
             description: UUID запуска DAG (один на весь батч ingest_combo)
             data_type: UUID
-            tests:
+            data_tests:
               - not_null
           - name: source
-            description: Источник, всегда 'hh.ru' на этом этапе
+            description: "Источник, всегда hh.ru на этом этапе"
             data_type: LowCardinality(String)
           - name: search_text
-            description: Текст запроса (роль) — 'DevOps Engineer' / 'Platform Engineer'
+            description: "Текст запроса (роль)"
             data_type: LowCardinality(String)
-            tests:
+            data_tests:
               - not_null
           - name: search_area
-            description: Региональный срез — 'msk' / 'spb' / 'remote'
+            description: "Региональный срез — msk / spb / remote"
             data_type: LowCardinality(String)
-            tests:
+            data_tests:
               - not_null
           - name: page_num
             description: Номер страницы выдачи
             data_type: UInt16
           - name: vacancy_id
-            description: ID вакансии на HH (НЕ уникален в bronze глобально)
+            description: "ID вакансии на HH (НЕ уникален в bronze глобально)"
             data_type: String
-            tests:
+            data_tests:
               - not_null
           - name: raw_json
             description: >
               JSON-payload вакансии. Структура зависит от source_mode:
-              - API: поля name, employer.name, salary.from/to, alternate_url, ...
-              - HTML fallback: title, employer, description, skills, detail_status, ...
-              См. stg_hh_vacancies для маппинга.
+              API или HTML fallback. См. stg_hh_vacancies для маппинга.
             data_type: String
-            tests:
+            data_tests:
               - not_null

@@ -4,7 +4,7 @@ dbt_hh_transform — T в паттерне ELT.
 Цепочка: check_bronze → dbt_deps → staging → test → silver → test → gold → check_silver
 
 Решение read-only монтирования /opt/airflow/dbt:
-  Копируем проект в /tmp/dbt-project (туда dbt пишет logs/target/dbt_packages).
+  Копируем только нужные файлы проекта в /tmp/dbt-project (без .venv, logs, target).
 
 Кеш dbt deps:
   Пакеты хранятся в /tmp/dbt-packages-cache — устанавливаются один раз
@@ -87,25 +87,39 @@ def dbt_hh_transform():
             print(f"  {k}: {v}")
         return stats
 
-    # Кешируем dbt deps — устанавливаем один раз в /tmp/dbt-packages-cache,
-    # при последующих запусках просто копируем из кеша (~секунды).
+    # Копируем только нужные файлы проекта (без .venv, logs, target, dbt_packages).
+    # .venv весит ~145 МБ и не нужен dbt в контейнере — там dbt уже установлен
+    # через _PIP_ADDITIONAL_REQUIREMENTS.
+    # Кеш пакетов: устанавливаем один раз, при следующих запусках восстанавливаем
+    # из /tmp/dbt-packages-cache (~секунды вместо 2-3 минут).
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=f"""
 set -e
 
-# Свежая копия проекта (без dbt_packages)
+echo "[dbt_deps] Копируем проект (без .venv, logs, target, dbt_packages)"
 rm -rf {DBT_TMP}
-cp -r {DBT_SRC} {DBT_TMP}
+mkdir -p {DBT_TMP}
+
+# Копируем только то что нужно dbt для работы
+for item in models macros tests seeds analyses snapshots \
+            dbt_project.yml profiles.yml packages.yml; do
+    src="{DBT_SRC}/$item"
+    if [ -e "$src" ]; then
+        cp -r "$src" "{DBT_TMP}/$item"
+    fi
+done
+
+echo "[dbt_deps] Проект скопирован, размер: $(du -sh {DBT_TMP} | cut -f1)"
 
 if [ -d {DBT_PKG_CACHE} ]; then
-    echo "[dbt_deps] Кеш найден, восстанавливаем пакеты из {DBT_PKG_CACHE}"
+    echo "[dbt_deps] Кеш найден — восстанавливаем пакеты из {DBT_PKG_CACHE}"
     cp -r {DBT_PKG_CACHE} {DBT_TMP}/dbt_packages
     echo "[dbt_deps] Пакеты восстановлены из кеша"
 else
-    echo "[dbt_deps] Кеша нет, запускаем dbt deps (первый раз)"
+    echo "[dbt_deps] Кеша нет — запускаем dbt deps (первый раз)"
     cd {DBT_TMP} && dbt deps {PF} 2>&1
-    echo "[dbt_deps] Кешируем установленные пакеты в {DBT_PKG_CACHE}"
+    echo "[dbt_deps] Кешируем пакеты в {DBT_PKG_CACHE}"
     cp -r {DBT_TMP}/dbt_packages {DBT_PKG_CACHE}
     echo "[dbt_deps] Кеш сохранён"
 fi
