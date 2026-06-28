@@ -1,78 +1,69 @@
 # Orchestration (Airflow 3.x)
 
-Этот каталог монтируется в контейнеры Airflow:
+Каталог монтируется в контейнеры Airflow:
 
-| Путь в хосте | Путь в контейнере | Назначение |
-|--------------|-------------------|-----------|
-| `dags/`      | `/opt/airflow/dags`    | DAG-и (Python) |
-| `plugins/`   | `/opt/airflow/plugins` | Кастомные плагины (если будут) |
-| `logs/`      | `/opt/airflow/logs`    | Логи task instances |
-| `requirements.txt` | через `_PIP_ADDITIONAL_REQUIREMENTS` | доп. Python-пакеты |
+| Путь на хосте | Путь в контейнере | Назначение |
+|---|---|---|
+| `dags/` | `/opt/airflow/dags` | DAG-и |
+| `plugins/` | `/opt/airflow/plugins` | Кастомные плагины |
+| `logs/` | `/opt/airflow/logs` | Логи task instances |
+| `../dbt/` | `/opt/airflow/dbt:ro` | dbt-проект (read-only) |
 
-## Архитектура
+---
+
+## Архитектура Airflow
 
 ```
-                    ┌──────────────────────┐
-                    │   airflow-api-server │  ← UI и REST API (FastAPI)
-                    └──────────────────────┘
-                              │
-                    ┌──────────────────────┐
-                    │   airflow-scheduler  │  ← планирует и ставит задачи в очередь
-                    └──────────────────────┘
-                              │
-                    ┌──────────────────────┐
-                    │ airflow-dag-processor│  ← парсит DAG-файлы (отдельный сервис в 3.x)
-                    └──────────────────────┘
-                              │
-                    ┌──────────────────────┐
-                    │   airflow-triggerer  │  ← async sensors
-                    └──────────────────────┘
-                              │
-                    ┌──────────────────────┐
-                    │    airflow-worker    │  ← Celery worker, исполняет задачи
-                    └──────────────────────┘
-                         │           │
-                    ┌────┴───┐   ┌───┴────┐
-                    │ Redis  │   │Postgres│
-                    │(broker)│   │ (meta) │
-                    └────────┘   └────────┘
+airflow-api-server    UI + REST API (FastAPI, :8080)
+airflow-scheduler     планирует задачи, ставит в очередь Celery
+airflow-dag-processor парсит DAG-файлы (отдельный процесс в 3.x)
+airflow-triggerer     async sensors и deferrable operators
+airflow-worker        Celery-воркер, исполняет задачи
+airflow-init          разовый: db migrate
+
+Redis    Celery broker (профиль core)
+Postgres метаданные Airflow, БД airflow_meta (профиль core)
+StatsD   принимает UDP-метрики от Airflow (профиль core)
 ```
 
-PostgreSQL (БД `airflow_meta`) и Redis уже есть в профиле `core`.
+---
 
-## Как добавить новый DAG
+## DAG-и
 
-1. Создай `dags/мой_dag.py`
-2. Airflow подхватит через `dag-processor` (~10-30 секунд)
-3. Проверь: `make airflow-list-dags`
-4. Запусти вручную: `make airflow-trigger DAG=мой_dag`
+| DAG | Schedule | Тип | Описание |
+|---|---|---|---|
+| `hh_vacancies_snapshot` | `0 */4 * * *` | E+L | HH.ru → bronze_hh_vacancies |
+| `dbt_hh_transform` | `None` | T | bronze → silver → gold через dbt |
 
-## Текущие DAG-и
+ELT-связка: последняя задача `hh_vacancies_snapshot` — `trigger_dbt_transform` —
+вызывает `TriggerDagRunOperator` и запускает `dbt_hh_transform` автоматически.
 
-| DAG ID | Schedule | Описание |
-|--------|----------|----------|
-| `hh_vacancies_snapshot` | `0 */4 * * *` | Snapshot вакансий с HH.ru → bronze (ClickHouse) |
+---
 
-### `hh_vacancies_snapshot`: как сейчас забираются данные
+## hh_vacancies_snapshot: как работает
 
-DAG собирает 6 срезов: две роли (`DevOps Engineer`, `Platform Engineer`) × три региона (`msk`, `spb`, `remote`).
-Основной путь — публичный endpoint `https://api.hh.ru/vacancies`.
+6 срезов параллельно: 2 роли × 3 региона.
 
-На практике `api.hh.ru` может вернуть `401/403 forbidden` из-за внешней защиты HH/ddos-guard. Чтобы DAG не был
-просто "зелёным без данных", в `ingest_combo` добавлен fallback:
+**Warmup-flow:** `curl_cffi Session(impersonate=chrome120)` → GET hh.ru/ → GET hh.ru/search/vacancy → API-запрос.
 
-1. создаётся `curl_cffi.Session` с `impersonate=chrome120`;
-2. выполняется warmup: `https://hh.ru/` → `https://hh.ru/search/vacancy?...`;
-3. если API вернул `401/403`, задача переключается на HTML-поиск `https://hh.ru/search/vacancy`;
-4. из карточек выдачи парсятся `vacancy_id`, `title`, `url`, `employer`, `salary`, `address`, `card_text`,
-   `experience_card`, `work_format_card`;
-5. по `url` опционально догружается detail-страница вакансии: `description`, `experience`, `employment`, `schedule`,
-   `skills`, `salary_detail`, `address_detail`;
-6. результат пишется в `bronze_hh_vacancies.raw_json` с `source_mode="html_fallback"`.
+**HTML fallback при 401/403:** парсинг `hh.ru/search/vacancy` через BeautifulSoup.
+По каждой вакансии опционально загружается detail-страница (description, skills, experience).
 
-Ограничитель fallback задаётся через `.env`:
+**Retry-safe:** перед INSERT делает SELECT существующих vacancy_id, фильтрует дубли.
+
+### Поля raw_json
+
+| `source_mode` | `detail_status` | Ключевые поля |
+|---|---|---|
+| `html_fallback` | `ok` | description, skills, experience, salary_detail |
+| `html_fallback` | `captcha` | card_text, experience_card, work_format_card |
+| `html_fallback` | `not_fetched_limit` | только карточные поля |
+| `api` | — | name, employer.name, salary.from/to |
+
+### Настройки через .env
 
 ```env
+DPIB_HH_IMPERSONATE=chrome120
 DPIB_HH_HTML_FALLBACK_MAX_PAGES=5
 DPIB_HH_FETCH_DETAILS=true
 DPIB_HH_DETAIL_MAX_PER_COMBO=100
@@ -80,53 +71,59 @@ DPIB_HH_DETAIL_PAUSE_MIN_SEC=0.2
 DPIB_HH_DETAIL_PAUSE_MAX_SEC=0.6
 ```
 
-Текущая проверка после фикса: manual run `2026-06-25 18:52:44` завершился `success`, все 6 mapped-задач
-`ingest_combo` завершились `success`, в `bronze_hh_vacancies` попала 421 строка.
+---
 
-Проверить факт загрузки:
+## dbt_hh_transform: задачи
 
-```sql
-SELECT count(), uniqExact(snapshot_id), max(ingested_at)
-FROM bronze_hh_vacancies;
+| Задача | Тип | Что делает |
+|---|---|---|
+| `check_bronze` | Python | Проверяет наличие данных в последнем снапшоте |
+| `dbt_deps` | Bash | Копирует проект в /tmp, восстанавливает пакеты из кеша |
+| `dbt_run_staging` | Bash | dbt run staging → stg_hh_vacancies (view) |
+| `dbt_test_staging` | Bash | dbt test staging → not_null, accepted_values |
+| `dbt_run_silver` | Bash | dbt run silver → silver_hh_vacancies (table) |
+| `dbt_test_silver` | Bash | dbt test silver → unique_combination_of_columns |
+| `dbt_run_gold` | Bash | dbt run gold → gold_skills_top (table) |
+| `check_silver` | Python | SELECT grain + качество, падает если rows != unique_keys |
 
-SELECT search_text, search_area, count()
-FROM bronze_hh_vacancies
-GROUP BY search_text, search_area
-ORDER BY search_text, search_area;
+**Кеш dbt deps:** пакеты ставятся один раз в `/tmp/dbt-packages-cache`.
+При следующих запусках восстанавливаются cp -r (~5 сек вместо 2-3 мин).
+
+**read-only монтирование:** `/opt/airflow/dbt:ro`. Задача `dbt_deps` копирует
+только `models/`, `macros/`, `*.yml` — без `.venv` (~145 МБ) и артефактов.
+
+---
+
+## Метрики Airflow через StatsD
+
+Airflow → UDP → `statsd-exporter:9125` → Prometheus `/metrics` на `:9102`.
+
+```
+airflow_dag_*_duration          время выполнения DAG-а
+airflow_operator_failures_*     счётчик падений по типу оператора
+airflow_scheduler_heartbeat     heartbeat планировщика
+airflow_celery_*                состояние очереди Celery
 ```
 
-Важно: HTML fallback всё равно менее контрактный, чем API: CSS/HTML HH может меняться. Detail-страницы могут увести на
-captcha, поэтому detail-догрузка не валит DAG при ошибке одной вакансии: в `raw_json.detail_status` будет `ok`,
-`captcha`, `http_*`, `error`, `not_fetched_limit` или `disabled`. Для silver/gold нужно читать поля с учётом
-`source_mode` и `detail_status`; если `detail_status != "ok"`, использовать поля из карточки (`experience_card`,
-`work_format_card`, `card_text`).
+Проверить:
 
-## Доступ к UI
+```bash
+curl -s http://localhost:9102/metrics | grep "^airflow" | head -10
+```
 
-http://localhost:8080 — логин/пароль из `.env` (по умолчанию `admin / admin`).
+---
 
 ## Полезные команды
 
 ```bash
-make airflow-logs                                    # tail логов scheduler+worker+dag-processor
-make airflow-shell                                   # bash внутри scheduler
-make airflow-list-dags                               # список DAG-ов
-make airflow-trigger DAG=hh_vacancies_snapshot       # запустить DAG вручную
+make airflow-trigger DAG=hh_vacancies_snapshot
+make airflow-trigger DAG=dbt_hh_transform
+make airflow-logs
+make airflow-shell
 
-# проверить состояние Celery worker-а
-docker exec dpib-airflow-worker airflow celery inspect active
-```
+# Проверить кеш dbt
+docker exec dpib-airflow-worker ls -lah /tmp/dbt-packages-cache 2>/dev/null || echo "кеш пуст"
 
-## Про `_PIP_ADDITIONAL_REQUIREMENTS`
-
-Это **анти-паттерн для прода** — пакеты ставятся при каждом старте контейнера, что
-замедляет запуск и небезопасно. Для лабы удобно: меняешь `requirements.txt` —
-перезапуск контейнера, всё подтянулось.
-
-Когда дойдём до выроста в Kubernetes — соберём кастомный образ:
-
-```dockerfile
-FROM apache/airflow:3.0.3-python3.12
-COPY requirements.txt /requirements.txt
-RUN pip install --no-cache-dir -r /requirements.txt
+# Список DAG-ов
+docker exec dpib-airflow-scheduler airflow dags list
 ```

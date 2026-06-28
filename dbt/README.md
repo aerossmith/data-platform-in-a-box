@@ -1,77 +1,63 @@
 # dbt — трансформации bronze → silver → gold
 
 dbt-проект поверх `dpib.bronze_hh_vacancies` (ClickHouse).
-Не трогает ingest, не меняет docker-compose — только читает bronze и пишет
-модели в отдельные базы `dpib_silver` и `dpib_gold`.
+Не трогает ingest, не меняет docker-compose. Читает bronze,
+пишет модели в отдельные базы `dpib_silver` и `dpib_gold`.
 
-## Раскладка по базам в ClickHouse
+---
+
+## Раскладка по базам ClickHouse
 
 | База | Что внутри | Кто пишет |
 |---|---|---|
-| `dpib`        | `bronze_hh_vacancies`, прикладные таблицы | DAG `hh_vacancies_snapshot` |
-| `dpib_silver` | `stg_hh_vacancies` (view), `silver_hh_vacancies` (table) | dbt (этот проект) |
-| `dpib_gold`   | `gold_skills_top`, остальные витрины | dbt (этот проект) |
+| `dpib` | `bronze_hh_vacancies` | DAG `hh_vacancies_snapshot` |
+| `dpib_silver` | `stg_hh_vacancies` (view), `silver_hh_vacancies` (table) | dbt |
+| `dpib_gold` | `gold_skills_top` (table) | dbt |
 
-Базы `dpib_silver` и `dpib_gold` создаются:
-- автоматически при первом старте ClickHouse через `init/clickhouse/03_create_databases.sql`;
-- вручную для уже работающего контейнера: `make clickhouse-bootstrap` (из корня репозитория).
+Базы создаются при первом старте ClickHouse через `init/clickhouse/03_create_databases.sql`.
+Для уже работающего контейнера: `make clickhouse-bootstrap`.
+
+---
 
 ## Поток данных
 
 ```
-bronze_hh_vacancies          dpib            (append-only, raw_json, не трогаем)
-        ↓
-stg_hh_vacancies             dpib_silver     (view, парсит raw_json, унифицирует payload)
-        ↓
-silver_hh_vacancies          dpib_silver     (table, dedup по (snapshot_id, vacancy_id))
-        ↓
-gold_skills_top              dpib_gold       (топ навыков по latest snapshot)
+bronze_hh_vacancies   dpib        append-only, raw_json (не трогаем)
+        |
+stg_hh_vacancies      dpib_silver view: JSONExtract + quality_score + has_detail
+        |
+silver_hh_vacancies   dpib_silver table: dedup по (snapshot_id, vacancy_id)
+        |
+gold_skills_top       dpib_gold   table: топ навыков по latest-снапшоту
 ```
 
-## Установка (один раз)
+---
+
+## Локальная разработка
 
 ```bash
-# Из WSL внутри корня репозитория
 cd dbt
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
+python3 -m venv .venv && source .venv/bin/activate
 pip install dbt-core==1.8.* dbt-clickhouse==1.8.*
-
-# Зависимости (dbt_utils для composite-unique теста)
 dbt deps --profiles-dir .
+dbt debug --profiles-dir .   # проверка соединения
+dbt build --profiles-dir .   # run + test за один шаг
 ```
 
-## Запуск
+Профиль по умолчанию: `localhost:8123`, user=`dpib`, pass=`dpib_pass`.
+При запуске из Airflow переменные `DPIB_CLICKHOUSE_*` уже выставлены.
 
-```bash
-cd dbt
-source .venv/bin/activate
+---
 
-# Если базы dpib_silver/dpib_gold ещё не созданы (старый том ClickHouse):
-#   из корня репозитория сначала
-make clickhouse-bootstrap
+## Запуск через Airflow
 
-# Профиль по умолчанию: localhost:8123, user=dpib, pass=dpib_pass.
-# При желании переопредели:
-#   export DBT_CH_HOST=...  DBT_CH_PASSWORD=...
+DAG `dbt_hh_transform` запускается автоматически после `hh_vacancies_snapshot`.
+Можно запустить вручную: `make airflow-trigger DAG=dbt_hh_transform`.
 
-# Проверка соединения
-dbt debug --profiles-dir .
+Кеш dbt_packages живёт в `/tmp/dbt-packages-cache` внутри воркер-контейнера.
+Первый запуск ~2-3 мин (скачивает dbt_utils), последующие ~5 сек.
 
-# Прогон всех моделей (порядок зависимостей dbt разрулит сам)
-dbt run --profiles-dir .
-
-# Только staging+silver
-dbt run --profiles-dir . --select staging silver
-
-# Прогнать тесты (not_null, accepted_values, unique-combo)
-dbt test --profiles-dir .
-
-# Один конкретный select
-dbt run --profiles-dir . --select stg_hh_vacancies
-```
+---
 
 ## Проверка результатов
 
@@ -80,80 +66,78 @@ make clickhouse-cli
 ```
 
 ```sql
--- Smoke: всё ли поднялось в правильных базах
-SHOW DATABASES;
-SHOW TABLES FROM dpib_silver;
-SHOW TABLES FROM dpib_gold;
-
-SELECT count() FROM dpib_silver.stg_hh_vacancies;
-SELECT count() FROM dpib_silver.silver_hh_vacancies;
-SELECT count() FROM dpib_gold.gold_skills_top;
-
--- silver: соблюдён ли grain?
+-- Grain silver соблюдён?
 SELECT count() AS rows, uniq((snapshot_id, vacancy_id)) AS unique_keys
 FROM dpib_silver.silver_hh_vacancies;
--- rows == unique_keys → grain (snapshot_id, vacancy_id) уникален
+-- rows должно == unique_keys
 
 -- Распределение качества payload
 SELECT source_mode, detail_status, count()
 FROM dpib_silver.silver_hh_vacancies
 GROUP BY 1, 2 ORDER BY 3 DESC;
 
--- gold: топ-20 навыков
+-- Топ-20 навыков
 SELECT skill, vacancies_count, devops_count, platform_count, remote_count
 FROM dpib_gold.gold_skills_top
-ORDER BY vacancies_count DESC
-LIMIT 20;
+ORDER BY vacancies_count DESC LIMIT 20;
 ```
+
+---
 
 ## Структура
 
 ```
 dbt/
-├── dbt_project.yml              ← проект, schema per layer (silver/gold)
-├── profiles.yml                 ← подключение к ClickHouse через ENV
-├── packages.yml                 ← dbt_utils
+├── dbt_project.yml              schema per layer: silver / gold
+├── profiles.yml                 DPIB_CLICKHOUSE_* env vars
+├── packages.yml                 dbt_utils (unique_combination_of_columns)
 ├── macros/
-│   └── generate_schema_name.sql ← маппинг "silver" → dpib_silver, "gold" → dpib_gold
-├── models/
-│   ├── staging/
-│   │   ├── _sources.yml         ← bronze в базе dpib
-│   │   ├── _stg_hh_vacancies.yml
-│   │   └── stg_hh_vacancies.sql ← view в dpib_silver
-│   ├── silver/
-│   │   ├── _silver_hh_vacancies.yml
-│   │   └── silver_hh_vacancies.sql ← table в dpib_silver
-│   └── gold/
-│       └── gold_skills_top.sql  ← table в dpib_gold
-└── README.md
+│   └── generate_schema_name.sql silver → dpib_silver, gold → dpib_gold
+└── models/
+    ├── staging/
+    │   ├── _sources.yml         bronze в базе dpib + data_tests
+    │   ├── _stg_hh_vacancies.yml
+    │   └── stg_hh_vacancies.sql JSONExtract + coalesce по source_mode/detail_status
+    ├── silver/
+    │   ├── _silver_hh_vacancies.yml
+    │   └── silver_hh_vacancies.sql  row_number() + matched_roles/areas
+    └── gold/
+        └── gold_skills_top.sql  argMax + ARRAY JOIN по skills
 ```
 
-## Что НЕ делаем на этом этапе
+---
 
-- Не трогаем `orchestration/dags/hh_vacancies_snapshot.py` — он рабочий
-- Не меняем `docker-compose.yml` (запускаем dbt из WSL локально)
-- Не интегрируем в Airflow — это после стабилизации моделей
-- Не парсим skills из description через NER — это в roadmap
+## Ключевые решения
+
+**Grain:**
+- bronze: `(snapshot_id, search_text, search_area, vacancy_id, page_num)` — append-only
+- silver: `(snapshot_id, vacancy_id)` — dedup внутри снапшота, тест `unique_combination_of_columns`
+- gold: `vacancy_id` (latest snapshot per vacancy)
+
+**quality_score в staging:**
+```
+4 — html_fallback + detail_status=ok     (description, skills доступны)
+3 — html_fallback + detail_status=captcha (только карточные поля)
+2 — html_fallback + другой статус
+1 — api (на момент написания API закрыт ddos-guard)
+0 — неизвестно
+```
+
+**Выбор лучшей строки в silver:**
+`ROW_NUMBER() OVER (PARTITION BY snapshot_id, vacancy_id ORDER BY quality_score DESC, description_length DESC, ingested_at DESC)`
+
+**Маппинг баз через макрос:**
+`generate_schema_name.sql` переопределяет стандартный dbt-маппинг.
+`+schema: silver` → `dpib_silver`, `+schema: gold` → `dpib_gold`.
+
+---
 
 ## Roadmap
 
-| # | Что | Зачем |
+| Шаг | Что | Зачем |
 |---|---|---|
-| 1 | `gold_vacancies_latest` | Single source of truth — latest snapshot per vacancy_id |
-| 2 | `gold_salary_by_role` | Медианы / p25 / p75 зарплат по ролям и регионам |
+| 1 | `gold_vacancies_latest` | Single source of truth — latest snapshot per vacancy |
+| 2 | `gold_salary_by_role` | Медианы зарплат по ролям и регионам |
 | 3 | `gold_employer_top` | Топ работодателей, retention вакансий |
-| 4 | NER/keywords по description | Skills почти всегда `[]` — нужен fallback |
-| 5 | dbt-runner в docker-compose | Воспроизводимость |
-| 6 | DAG `dbt_hh_transform` в Airflow | Автоматизация (run после ingest) |
-| 7 | dbt-snapshot на vacancy_id | Slow-changing dimension по статусам/зарплате |
-
-## Технические заметки
-
-- В dbt-clickhouse `schema` мапится на ClickHouse database. Чтобы получить
-  именно `dpib_silver` / `dpib_gold` (а не дефолтный префикс `dpib_*`),
-  переопределён макрос `generate_schema_name` — см. `macros/`.
-- `raw_json` в bronze хранится как `String`, используем `JSONExtractString`,
-  `JSONExtract(..., 'Array(String)')`, и т.д.
-- Engine silver: `MergeTree()`, ключ `(snapshot_id, vacancy_id)`,
-  партиционирование по месяцам по `ingested_at`.
-- `materialized=view` для staging — не дублирует данные, читатели идут в silver.
+| 4 | NER/keywords по description | skills=[] у большинства вакансий |
+| 5 | DAG `dbt_hh_transform` в K8s | Helm + DockerOperator вместо BashOperator |
