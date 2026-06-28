@@ -1,278 +1,186 @@
 # Data Platform in a Box — План проекта
 
-Версия: 2.0
+Версия: 3.0
 Дата: июнь 2026
-Изменения от v1.0: зафиксированы домены данных (HH.ru, HuggingFace),
-введена медальонная архитектура bronze/silver/gold, переформулированы шаги 3–4
-с акцентом на полезной нагрузке и one-command demo.
 
 ---
 
 ## Цель
 
-Локальная DWH/BI платформа в Docker Compose с **реальной полезной нагрузкой**,
+Локальная DWH/BI платформа в Docker Compose с реальной полезной нагрузкой,
 поднимаемая одной командой. Используется как:
 
-- рабочий стенд для аналитики реальных данных
+- рабочий стенд для аналитики реальных данных рынка труда
 - фундамент для AI/DevOps-проектов (RAG, Text-to-SQL, AIOps)
-- portfolio-демонстрация платформенных навыков
+- portfolio-демонстрация платформенных навыков (DevOps + Data)
+
+---
+
+## Текущий статус
+
+| # | Этап | Статус |
+|---|------|--------|
+| 1 | Core — PostgreSQL + ClickHouse + Redis | ✅ готово |
+| 2 | Monitoring — Prometheus + Grafana + Alertmanager + exporters | ✅ готово |
+| 2.5 | CI — GitHub Actions, статический lint | ✅ готово |
+| 3 | Orchestration — Airflow 3.x + ingest HH.ru → bronze | ✅ готово |
+| 4 | Transform — dbt bronze → silver → gold, автозапуск из Airflow | ✅ готово |
+| 5 | Grafana дашборды с реальными метриками CH + Airflow | 🔜 следующий |
+| 6 | Superset — дашборд поверх gold-витрин | ⏳ |
+| 7 | `make demo` — one-command deploy с данными | ⏳ |
+| 8 | AI-слой — Qdrant + RAG поверх runbooks | ⏳ |
+| 9 | AIOps-lite — Alertmanager → n8n → LLM → Telegram | ⏳ |
+| 10 | Второй коннектор — HuggingFace | ⏳ |
+| 11 | Финальный README, диаграмма, скриншоты | ⏳ |
+
+---
+
+## Что сделано (детали)
+
+### Шаг 1 — Core
+
+- PostgreSQL 16-alpine + ClickHouse 24-alpine + Redis 7-alpine
+- Init-скрипты: схемы, тестовые данные, БД airflow_meta
+- Healthcheck-и для всех сервисов
+- Docker-профиль `core`
+
+### Шаг 2 — Monitoring
+
+- Prometheus 2.54 scrape: node-exporter, cAdvisor, postgres-exporter, ClickHouse :9363
+- Grafana 11.2 с provisioning datasource + базовый дашборд
+- Alertmanager 0.27 (пока null-receiver, вебхуки — шаг 9)
+- StatsD-exporter в профиле `core` (принимает UDP от Airflow, отдаёт Prometheus)
+- Docker-профиль `monitoring`
+
+### Шаг 2.5 — CI
+
+- GitHub Actions: `docker compose config`, `yamllint`, `xmllint`, `jq empty`, `sqlfluff`
+- Без поднятия контейнеров, ~25 сек на каждый push/PR
+
+### Шаг 3 — Orchestration (E + L)
+
+- Airflow 3.0.3-python3.12, CeleryExecutor, 6 контейнеров
+- DAG `hh_vacancies_snapshot` — cron `0 */4 * * *`
+- 6 срезов параллельно: DevOps Engineer + Platform Engineer × msk + spb + remote
+- curl_cffi с `impersonate=chrome120` — TLS fingerprint Chrome (обход ddos-guard)
+- Warmup-flow: hh.ru/ → hh.ru/search/vacancy → API/HTML
+- При 401/403 — HTML fallback через BeautifulSoup с detail-страницами
+- Retry-safe вставка (SELECT существующих vacancy_id перед INSERT)
+- Поля `source_mode` / `detail_status` / `quality_score` в raw_json
+- Медальонная bronze-схема: `dpib.bronze_hh_vacancies`
+- StatsD-метрики Airflow → Prometheus через statsd-exporter
+- Docker-профиль `orchestration`
+
+### Шаг 4 — Transform (T)
+
+- dbt 1.8.9 + dbt-clickhouse 1.8.9
+- Три базы ClickHouse: `dpib` (bronze) / `dpib_silver` / `dpib_gold`
+- `stg_hh_vacancies` — view, JSONExtract + coalesce по source_mode/detail_status, quality_score
+- `silver_hh_vacancies` — table, dedup по (snapshot_id, vacancy_id), matched_roles/areas
+- `gold_skills_top` — table, топ навыков по latest-снапшоту вакансии
+- Тесты: 25 проверок, PASS=25 WARN=0 ERROR=0
+- DAG `dbt_hh_transform` — 8 задач: check_bronze → deps(кеш) → staging → test → silver → test → gold → check_silver
+- Автозапуск через `TriggerDagRunOperator` после `hh_vacancies_snapshot`
+- Кеш dbt_packages в `/tmp/dbt-packages-cache` (~5 сек вместо 2-3 мин)
+- dbt монтируется `:ro`, проект копируется в `/tmp` без .venv (~145 МБ)
+
+---
+
+## Что дальше
+
+### Шаг 5 — Grafana дашборды (следующий)
+
+Данные уже идут в Prometheus — нужны дашборды:
+
+**ClickHouse health:**
+- `ClickHouseMetrics_Query` — активные запросы
+- `ClickHouseProfileEvents_InsertedRows` — скорость вставки
+- `ClickHouseAsyncMetrics_TotalPartsOfMergeTreeTables` — количество parts
+- размер таблиц по слоям (bronze/silver/gold) — через SQL-datasource
+
+**Airflow health:**
+- `airflow_dag_*_duration` — время выполнения DAG-ов
+- `airflow_operator_failures_*` — падения по типу оператора
+- `airflow_scheduler_heartbeat` — живость планировщика
+- `airflow_celery_*` — состояние очереди
+
+### Шаг 6 — Superset
+
+- Docker-профиль `viz`
+- Подключение к ClickHouse (dpib_gold)
+- Дашборд: топ навыков, динамика по снапшотам, разбивка по ролям/регионам
+
+### Шаг 7 — `make demo`
+
+- One-command: `make demo`
+- Поднимает стек → ждёт healthcheck → первый snapshot → dbt build → открывает Superset
+- Время: 3-5 минут с нуля
+
+### Шаг 8 — AI-слой (Qdrant + RAG)
+
+- Qdrant в профиле `ai`
+- Индексация: `runbooks/`, `dbt/README.md`, `orchestration/README.md`
+- Первый RAG-агент для ответов на вопросы об инфраструктуре
+- Связь с проектом `devops-agent-from-chatgpt`
+
+### Шаг 9 — AIOps-lite
+
+- Alertmanager → webhook → n8n (уже в облаке)
+- n8n → LLM → анализ алерта → Telegram
+- Первый реальный сигнал: CPU spike или упавший DAG
+
+### Шаг 10 — HuggingFace коннектор
+
+- Второй источник: `huggingface.co/api/models`
+- Тот же bronze/silver/gold принцип
+- Multi-source DWH для портфолио
+
+### Шаг 11 — Финальный README
+
+- Диаграмма архитектуры (Mermaid или draw.io)
+- Скриншоты: Grafana, Superset, Airflow UI, Qdrant
+- Описание для резюме
 
 ---
 
 ## Домены данных
 
-### Домен №1 (основной): HH.ru — рынок труда в IT
+### HH.ru (основной)
 
-API: `api.hh.ru` — публичный, без авторизации, без VPN. Метод `/vacancies`
-с фильтрами по специализации, региону, опыту, плюс справочники `/dictionaries`
-и работодатели через `/employers`.
+API: `api.hh.ru` — публичный, без авторизации.
+Snapshot каждые 4 часа через Airflow + HTML fallback при блокировке.
 
-**Что собираем:**
+Что собираем: вакансии DevOps/Platform Engineer по Москве, СПб, удалёнке.
+Почему: доступно из РФ, релевантно лично, объём >10k вакансий, естественный лайфсайкл.
 
-- Открытые вакансии по DevOps, SRE, Platform Engineer, Data Engineer, ML Engineer
-- Регионы: Москва, СПб, удалёнка, плюс топ-городов
-- Фильтры опыта, занятости, графика работы
-- Работодатели с метаинформацией
+### HuggingFace (шаг 10)
 
-**Подход — snapshot.** Каждые 30 минут Airflow тянет свежую страницу выдачи,
-складывает raw JSON в bronze. История строится естественно: со временем
-видно, какие вакансии висят долго, какие быстро закрываются, как меняется
-медиана по неделям, какие навыки растут в спросе.
-
-**Почему именно этот домен:**
-
-- доступ напрямую из РФ, никаких прокси
-- релевантен лично — параллельный мониторинг своего же рынка
-- на собеседовании естественный ответ «зачем именно это»
-- объём приличный: ~10k+ DevOps-вакансий в любой момент
-
-### Домен №2 (вторичный, после стабилизации №1): HuggingFace — каталог моделей
-
-API: `huggingface.co/api/models`. Открытый, без VPN. Та же snapshot-схема —
-раз в час слепок топ-N моделей с метаданными (downloads, likes, теги, тип задачи,
-автор, базовая модель-родитель). История даёт тренды популярности LLM,
-динамику новых релизов, активность авторов.
-
-**Почему вторым:**
-
-- демонстрирует, что платформа multi-source (важно для портфолио)
-- релевантно LLMOps-позиционированию (второй пет-проект)
-- та же архитектура — те же bronze/silver/gold принципы
+API: `huggingface.co/api/models` — публичный.
+Топ-N моделей с метаданными (downloads, likes, теги, тип задачи).
+Тренды популярности LLM, динамика релизов.
 
 ---
 
-## Медальонная архитектура
+## Стек
 
-Стандарт индустрии — три слоя с явным разделением ответственности.
-
-### Bronze — сырые данные «как пришли»
-
-Принцип неизменности: что API отдал, то и легло. Никогда не удаляем,
-никогда не модифицируем. Источник правды.
-
-```sql
-CREATE TABLE bronze_hh_vacancies (
-    ingested_at  DateTime DEFAULT now(),
-    snapshot_id  UUID,                     -- ID запуска DAG
-    source       LowCardinality(String),   -- 'hh.ru'
-    raw_json     String,                   -- весь объект как пришёл
-    vacancy_id   String                    -- из raw для быстрого поиска
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(ingested_at)
-ORDER BY (ingested_at, vacancy_id);
-```
-
-### Silver — нормализованные данные
-
-Парсинг JSON, типизация, ETL. Идемпотентность через ReplacingMergeTree —
-если запустить пайплайн дважды, дублей не появится.
-
-```sql
-CREATE TABLE silver_vacancies (
-    vacancy_id      String,
-    snapshot_at     DateTime,
-    title           String,
-    company_id      String,
-    company_name    String,
-    salary_from     Nullable(Decimal(12,2)),
-    salary_to       Nullable(Decimal(12,2)),
-    salary_currency LowCardinality(String),
-    experience      LowCardinality(String),
-    employment      LowCardinality(String),
-    area_name       LowCardinality(String),
-    published_at    DateTime,
-    skills          Array(String),         -- распарсенные из описания
-    description     String,
-    raw_ingested_at DateTime                -- для версионирования
-) ENGINE = ReplacingMergeTree(raw_ingested_at)
-ORDER BY (vacancy_id, snapshot_at);
-```
-
-### Gold — аналитические витрины (через dbt)
-
-Агрегаты, тренды, ranking. Готово к подключению в Superset.
-
-Примеры моделей:
-
-- `mart_salary_by_role_week` — медиана зарплат по ролям и неделям
-- `mart_skills_demand` — ранжирование навыков по упоминаниям в описаниях
-- `mart_employers_activity` — топ-работодатели по активности найма
-- `mart_vacancy_lifetime` — сколько живёт вакансия до закрытия
-- `mart_remote_vs_office` — динамика удалёнки vs офис по неделям
+| Слой | Инструмент | Профиль |
+|---|---|---|
+| OLTP | PostgreSQL 16 | core |
+| OLAP | ClickHouse 24 | core |
+| Broker | Redis 7 | core |
+| Metrics relay | StatsD-exporter | core |
+| Orchestration | Airflow 3.x + Celery | orchestration |
+| Transform | dbt 1.8 + dbt-clickhouse | (из Airflow) |
+| Monitoring | Prometheus + Grafana + Alertmanager | monitoring |
+| Exporters | node-exporter + cAdvisor + pg-exporter | monitoring |
+| Visualization | Superset | viz (шаг 6) |
+| Vector DB | Qdrant | ai (шаг 8) |
 
 ---
 
-## Состав стека
+## Связь с другими проектами
 
-| Слой | Инструмент | Назначение |
-|------|-----------|-----------|
-| Core OLTP | PostgreSQL 16 | Метаданные Airflow, состояние агентов |
-| Core OLAP | ClickHouse 24 | Все три слоя bronze/silver/gold |
-| Оркестрация | Airflow 2.9+ | Ingest, нормализация, dbt run |
-| Трансформации | dbt + ClickHouse | Gold-витрины с тестами качества |
-| Визуализация | Superset | Дашборд из коробки |
-| Мониторинг | Prometheus + Grafana + Alertmanager | Observability стека (наш USP) |
-| Экспортёры | node-exporter, cAdvisor, postgres-exporter | Метрики хоста, контейнеров, БД |
-| AI-слой | Qdrant | Векторная база для RAG (этап AI) |
-| Прокси | Traefik | Единая точка входа |
-
----
-
-## Что НЕ берём (отличия от эталонной статьи)
-
-| Инструмент | Почему пропускаем |
-|-----------|-------------------|
-| Apache Kafka | Snapshot-подход через REST API не требует стриминга. Kafka вернётся на этапе AIOps если будет нужен event-bus для алертов |
-| Apache Spark | Объёмы лабораторные, ClickHouse сам считает rolling window через оконные функции на порядки быстрее. Spark оправдан при горизонтальном масштабировании, которого здесь не будет |
-| MinIO | Промежуточное S3-хранилище избыточно для REST-данных. ClickHouse напрямую складывает в bronze |
-
-### Что добавляем своего (чего нет в эталонной статье)
-
-- **Полноценный мониторинг и алертинг стека** — Prometheus, Grafana, Alertmanager, экспортёры. Это наш USP для DevOps/Platform-позиционирования
-- **AI-слой** — Qdrant и RAG-агент поверх runbook-документации
-- **CI/CD на GitHub Actions** — статические проверки (compose syntax, yamllint, xmllint, jq, sqlfluff)
-
----
-
-## Структура запуска
-
-```bash
-# базовая инфраструктура (то что уже работает)
-make up PROFILES="core monitoring"
-
-# полный стек с данными (one-command demo)
-make demo
-```
-
-`make demo` поднимает стек, ждёт healthcheck-и, накатывает первый snapshot
-вакансий, прогоняет dbt build, регистрирует datasource в Superset и
-загружает готовый дашборд. Через 5 минут после команды — рабочая платформа
-с реальными данными. Это критичный аспект для презентации в портфолио.
-
----
-
-## Этапы (актуальная очерёдность)
-
-| # | Этап | Статус |
-|---|------|--------|
-| 1 | Core (PostgreSQL + ClickHouse) | ✅ |
-| 2 | Monitoring (Prometheus + Grafana + экспортёры) | ✅ |
-| 2.5 | CI на GitHub Actions (статический lint) | ✅ |
-| 3 | **Orchestration** — Airflow + ingest HH.ru + bronze/silver | 🔜 следующий |
-| 4 | **dbt** — gold-витрины + тесты качества | ⏳ |
-| 5 | **Viz** — Superset с автонастроенным дашбордом | ⏳ |
-| 6 | `make demo` — one-command deploy с данными | ⏳ |
-| 7 | **AI-слой** — Qdrant + первые runbook'и в RAG | ⏳ |
-| 8 | Alertmanager → n8n webhook (AIOps-lite) | ⏳ |
-| 9 | Второй коннектор: HuggingFace | ⏳ |
-| 10 | Финальный README, диаграмма архитектуры, screenshots | ⏳ |
-
----
-
-## Системные требования
-
-### Локальный запуск (целевая машина: i5 12-gen, 32 GB RAM, RTX 3050, SSD)
-
-| Профиль | RAM | Время первого `make demo` |
-|---------|-----|---------------------------|
-| core | ~3 GB | 20 сек |
-| + monitoring | ~5 GB | 30 сек |
-| + orchestration | ~7 GB | 1-2 мин |
-| + viz | ~8 GB | 1 мин |
-| + ai (Qdrant) | ~9 GB | 30 сек |
-| **итого полный demo** | **~9 GB** | **3-5 мин** |
-
-Запас огромный, GPU не задействован (нужен только для LM Studio за пределами стека).
-
-### Вырост: Kubernetes + Yandex Cloud
-
-| Конфигурация | Ноды | RAM | Диск | Стоимость (YC, ≈) |
-|--------------|------|-----|------|-------------------|
-| Минимальный K8s | 3× s3-c2-m8 (2 vCPU, 8 GB) | 24 GB | 90 GB SSD | ~15 000 ₽/мес |
-| Рабочий K8s | 3× s3-c4-m16 (4 vCPU, 16 GB) | 48 GB | 200 GB SSD | ~30 000 ₽/мес |
-| С GPU (для LLM) | + 1× g2-c8-m64-g1 | +64 GB | +100 GB | +60 000 ₽/мес (T4) |
-
-Плюс managed-сервисы по выбору:
-
-- Managed PostgreSQL — от 5 000 ₽/мес (s3-c2-m8, 50 GB)
-- Managed ClickHouse — от 8 000 ₽/мес
-- Object Storage (S3) для бэкапов — копейки на малых объёмах
-
-**Стратегия миграции:** на этапе K8s держать PostgreSQL и ClickHouse как
-managed-сервисы YC, а в кластере крутить только stateless-компоненты
-(Airflow, Superset, Grafana, агенты). Ближе к продакшн-паттернам, проще
-в эксплуатации.
-
----
-
-## Структура репозитория (целевая, к концу всех этапов)
-
-```
-data-platform-in-a-box/
-├── .github/workflows/ci.yml
-├── docker-compose.yml
-├── .env.example
-├── Makefile
-├── README.md
-├── PROJECT_PLAN.md
-├── init/
-│   ├── postgres/01_init.sql           ← + создание БД для Airflow
-│   └── clickhouse/
-│       ├── 01_schema.sql              ← bronze/silver схемы
-│       └── 02_test_data.sql           ← опционально
-├── config/
-│   ├── clickhouse/
-│   ├── prometheus/
-│   ├── alertmanager/
-│   ├── grafana/
-│   ├── airflow/                       ← (этап 3)
-│   └── superset/                      ← (этап 5)
-├── dags/                              ← Airflow DAG-и (этап 3)
-│   ├── hh_snapshot.py
-│   └── hh_silver_normalize.py
-├── dbt/                               ← dbt-проект (этап 4)
-│   ├── models/silver/
-│   ├── models/gold/
-│   └── tests/
-├── docs/
-│   ├── architecture.md
-│   ├── decisions/                     ← ADR
-│   └── runbooks/                      ← регламенты (потом в RAG)
-└── scripts/
-    ├── demo_seed.sh                   ← заливка первого snapshot
-    └── superset_bootstrap.py          ← регистрация datasource и дашборда
-```
-
----
-
-## Связь с остальными пет-проектами
-
-- **Проект №2 (GitLab CI + dbt)** → dbt-модели из этого проекта переносятся
-  в корпоративный GitLab, обвязываются полным CI/CD pipeline (lint → test →
-  staging → prod). Здесь у нас прообраз, там — полноценная реализация.
-- **Проект №3 (Runbook-агент с RAG)** → регламенты из `docs/runbooks/`
-  индексируются в Qdrant. Агент отвечает на «что делать если X сломалось».
-- **Проект №4 (Text-to-SQL бот)** → бот делает запросы к Gold-витринам
-  ClickHouse. Schema из этого проекта — обучающий контекст для LLM.
-- **Проект №5 (AIOps-lite)** → Alertmanager шлёт webhook в n8n, LLM
-  анализирует с использованием RAG из проекта №3 и метрик из этого стека.
+- **GitLab CI + dbt** — dbt-модели отсюда переносятся в корпоративный GitLab с полным CI/CD
+- **Runbook-агент (RAG)** — `runbooks/` индексируются в Qdrant, агент отвечает на вопросы по инфраструктуре
+- **Text-to-SQL бот** — бот делает запросы к gold-витринам ClickHouse, schema отсюда — контекст для LLM
+- **AIOps-lite** — Alertmanager шлёт webhook в n8n, LLM анализирует с RAG из runbooks
