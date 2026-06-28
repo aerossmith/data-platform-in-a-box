@@ -24,3 +24,6 @@ venv/
 
 # Локальные тома если кто-то решит хранить bind-mount
 data/
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
