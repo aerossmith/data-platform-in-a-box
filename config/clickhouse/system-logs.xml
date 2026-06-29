@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!--
+  В локальном стенде подробные системные логи ClickHouse росли без TTL:
+  text_log превысил 57 млн строк, asynchronous_metric_log — 209 млн.
+  Это создавало постоянные фоновые merge и MEMORY_LIMIT_EXCEEDED.
+
+  Prometheus читает текущие system.metrics/events/asynchronous_metrics через
+  endpoint :9363, поэтому отключение их исторических таблиц мониторингу
+  не мешает. Query log остаётся включённым для диагностики SQL.
+-->
+<clickhouse>
+    <text_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+</clickhouse>

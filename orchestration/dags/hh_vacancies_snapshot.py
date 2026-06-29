@@ -6,6 +6,12 @@ hh_vacancies_snapshot — обход ddos-guard через 2-step warmup
 - warmup: главная hh.ru → страница поиска → API
 - HTML fallback при 401/403 от API
 - После успешного ingest — триггер dbt_hh_transform (T в ELT)
+- snapshot_id передаётся в TriggerDagRunOperator.conf
+
+Фиксы памяти:
+- fetch_detail_payload использует переданный session (не создаёт новый на каждую вакансию)
+- soup.decompose() после парсинга каждой detail-страницы
+- ingest_combo закрывает session через try/finally
 ============================================================
 """
 
@@ -184,10 +190,17 @@ def extract_work_format_from_card(card_text: str | None) -> str | None:
 
 
 def fetch_detail_payload(session, vacancy_url: str, referer: str, prefix: str) -> dict[str, Any]:
+    """
+    Загружает detail-страницу вакансии.
+    ВАЖНО: использует переданный session (прогретый, с cookies).
+    НЕ создаёт новый Session на каждую вакансию — это была утечка памяти
+    которая приводила к SIGKILL воркера.
+    soup.decompose() вызывается в finally для освобождения памяти.
+    """
     detail_url = canonical_vacancy_url(vacancy_url)
-    detail_session = curl_requests.Session(impersonate=IMPERSONATE_PROFILE)
+    soup = None
     try:
-        r = detail_session.get(detail_url, headers={"Referer": referer}, timeout=REQUEST_TIMEOUT)
+        r = session.get(detail_url, headers={"Referer": referer}, timeout=REQUEST_TIMEOUT)
     except Exception as e:
         return {"detail_status": "error", "detail_error": f"{type(e).__name__}: {e}"[:500]}
 
@@ -200,41 +213,47 @@ def fetch_detail_payload(session, vacancy_url: str, referer: str, prefix: str) -
         payload["detail_error"] = r.text[:500]
         return payload
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    page_title = first_text(soup, "h1") or ""
-    if "/account/captcha" in r.url or "не робот" in page_title.lower() or "captcha" in r.url:
-        payload.update({"detail_status": "captcha", "detail_error": page_title[:500] or r.text[:500]})
-        return payload
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+        page_title = first_text(soup, "h1") or ""
+        if "/account/captcha" in r.url or "не робот" in page_title.lower() or "captcha" in r.url:
+            payload.update({"detail_status": "captcha", "detail_error": page_title[:500] or r.text[:500]})
+            return payload
 
-    description = (
-        limited_text(soup, '[data-qa="vacancy-description"]')
-        or limited_text(soup, '[data-qa="vacancy-description-text"]')
-    )
-    payload.update({
-        "detail_title":    first_text(soup, '[data-qa="vacancy-title"]') or first_text(soup, "h1"),
-        "detail_employer": first_text(soup, '[data-qa="vacancy-company-name"]'),
-        "experience":      first_text(soup, '[data-qa="vacancy-experience"]'),
-        "employment": (
-            first_text(soup, '[data-qa="vacancy-view-employment-mode"]')
-            or first_text(soup, '[data-qa="vacancy-view-employment"]')
-        ),
-        "schedule":        first_text(soup, '[data-qa="vacancy-view-schedule"]'),
-        "salary_detail":   first_text(soup, '[data-qa="vacancy-salary"]'),
-        "address_detail": (
-            first_text(soup, '[data-qa="vacancy-view-raw-address"]')
-            or first_text(soup, '[data-qa="vacancy-view-location"]')
-        ),
-        "description": description,
-        "skills": unique_texts(soup, [
-            '[data-qa="skills-element"]',
-            '[data-qa="bloko-tag__text"]',
-            '[data-qa="vacancy-skill"]',
-        ]),
-    })
-    print(
-        f"{prefix} detail: status={payload['detail_status']}, "
-        f"skills={len(payload['skills'])}, desc_len={len(description or '')}"
-    )
+        description = (
+            limited_text(soup, '[data-qa="vacancy-description"]')
+            or limited_text(soup, '[data-qa="vacancy-description-text"]')
+        )
+        payload.update({
+            "detail_title":    first_text(soup, '[data-qa="vacancy-title"]') or first_text(soup, "h1"),
+            "detail_employer": first_text(soup, '[data-qa="vacancy-company-name"]'),
+            "experience":      first_text(soup, '[data-qa="vacancy-experience"]'),
+            "employment": (
+                first_text(soup, '[data-qa="vacancy-view-employment-mode"]')
+                or first_text(soup, '[data-qa="vacancy-view-employment"]')
+            ),
+            "schedule":        first_text(soup, '[data-qa="vacancy-view-schedule"]'),
+            "salary_detail":   first_text(soup, '[data-qa="vacancy-salary"]'),
+            "address_detail": (
+                first_text(soup, '[data-qa="vacancy-view-raw-address"]')
+                or first_text(soup, '[data-qa="vacancy-view-location"]')
+            ),
+            "description": description,
+            "skills": unique_texts(soup, [
+                '[data-qa="skills-element"]',
+                '[data-qa="bloko-tag__text"]',
+                '[data-qa="vacancy-skill"]',
+            ]),
+        })
+        print(
+            f"{prefix} detail: status={payload['detail_status']}, "
+            f"skills={len(payload.get('skills', []))}, desc_len={len(description or '')}"
+        )
+    finally:
+        # Освобождаем память BS4 дерева — важно при обработке сотен страниц
+        if soup is not None:
+            soup.decompose()
+
     return payload
 
 
@@ -259,57 +278,63 @@ def fetch_html_fallback(session, combo: dict[str, Any], snapshot_id: str,
                 f"URL={r.url} | body={r.text[:500]}"
             )
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        title_links = soup.select('a[data-qa="serp-item__title"]')
-        print(f"{prefix} HTML fallback page={page} got {len(title_links)} cards")
-        if not title_links:
-            break
+        soup = None
+        try:
+            soup = BeautifulSoup(r.text, "html.parser")
+            title_links = soup.select('a[data-qa="serp-item__title"]')
+            print(f"{prefix} HTML fallback page={page} got {len(title_links)} cards")
+            if not title_links:
+                break
 
-        page_new_rows = 0
-        for title_link in title_links:
-            vacancy_url = urljoin(HH_HOME_URL, title_link.get("href", ""))
-            vacancy_id = vacancy_id_from_url(vacancy_url)
-            if vacancy_id in seen_ids:
-                continue
+            page_new_rows = 0
+            for title_link in title_links:
+                vacancy_url = urljoin(HH_HOME_URL, title_link.get("href", ""))
+                vacancy_id = vacancy_id_from_url(vacancy_url)
+                if vacancy_id in seen_ids:
+                    continue
 
-            card = find_card_root(title_link)
-            card_text = card.get_text(" ", strip=True)[:2000] if card else None
-            raw = {
-                "source_mode":     "html_fallback",
-                "vacancy_id":      vacancy_id,
-                "title":           title_link.get_text(" ", strip=True),
-                "url":             vacancy_url,
-                "employer":        first_text(card, 'a[data-qa="vacancy-serp__vacancy-employer"]'),
-                "salary":          first_text(card, 'span[data-qa="vacancy-serp__vacancy-compensation"]'),
-                "address":         first_text(card, 'span[data-qa="vacancy-serp__vacancy-address"]'),
-                "search_text":     role,
-                "search_area":     area,
-                "page_num":        page,
-                "search_url":      r.url,
-                "card_text":       card_text,
-                "experience_card": extract_experience_from_card(card_text),
-                "work_format_card": extract_work_format_from_card(card_text),
-            }
+                card = find_card_root(title_link)
+                card_text = card.get_text(" ", strip=True)[:2000] if card else None
+                raw = {
+                    "source_mode":      "html_fallback",
+                    "vacancy_id":       vacancy_id,
+                    "title":            title_link.get_text(" ", strip=True),
+                    "url":              vacancy_url,
+                    "employer":         first_text(card, 'a[data-qa="vacancy-serp__vacancy-employer"]'),
+                    "salary":           first_text(card, 'span[data-qa="vacancy-serp__vacancy-compensation"]'),
+                    "address":          first_text(card, 'span[data-qa="vacancy-serp__vacancy-address"]'),
+                    "search_text":      role,
+                    "search_area":      area,
+                    "page_num":         page,
+                    "search_url":       r.url,
+                    "card_text":        card_text,
+                    "experience_card":  extract_experience_from_card(card_text),
+                    "work_format_card": extract_work_format_from_card(card_text),
+                }
 
-            if FETCH_DETAILS and details_fetched < DETAIL_MAX_PER_COMBO:
-                raw.update(fetch_detail_payload(session, vacancy_url, r.url, prefix))
-                details_fetched += 1
-                time.sleep(random.uniform(DETAIL_PAUSE_MIN_SEC, DETAIL_PAUSE_MAX_SEC))
-            elif FETCH_DETAILS:
-                raw["detail_status"] = "not_fetched_limit"
-            else:
-                raw["detail_status"] = "disabled"
+                if FETCH_DETAILS and details_fetched < DETAIL_MAX_PER_COMBO:
+                    # session передаётся в fetch_detail_payload — не создаём новый
+                    raw.update(fetch_detail_payload(session, vacancy_url, r.url, prefix))
+                    details_fetched += 1
+                    time.sleep(random.uniform(DETAIL_PAUSE_MIN_SEC, DETAIL_PAUSE_MAX_SEC))
+                elif FETCH_DETAILS:
+                    raw["detail_status"] = "not_fetched_limit"
+                else:
+                    raw["detail_status"] = "disabled"
 
-            rows.append({
-                "snapshot_id": snapshot_id,
-                "search_text": role,
-                "search_area": area,
-                "page_num":    page,
-                "vacancy_id":  vacancy_id,
-                "raw_json":    json.dumps(raw, ensure_ascii=False),
-            })
-            seen_ids.add(vacancy_id)
-            page_new_rows += 1
+                rows.append({
+                    "snapshot_id": snapshot_id,
+                    "search_text": role,
+                    "search_area": area,
+                    "page_num":    page,
+                    "vacancy_id":  vacancy_id,
+                    "raw_json":    json.dumps(raw, ensure_ascii=False),
+                })
+                seen_ids.add(vacancy_id)
+                page_new_rows += 1
+        finally:
+            if soup is not None:
+                soup.decompose()
 
         if page_new_rows == 0:
             break
@@ -356,62 +381,71 @@ def hh_vacancies_snapshot():
         print(f"{prefix} START")
 
         session, referer = warmup_session(combo, prefix)
-        base_params = dict(combo["api_params"])
-        base_params["per_page"] = PER_PAGE
-
-        api_headers = {
-            "Referer": referer,
-            "Origin": "https://hh.ru",
-            "Accept": "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
         all_rows = []
         total_pages = None
 
-        for page in range(MAX_PAGES):
-            base_params["page"] = page
-            print(f"{prefix} fetching page={page} params={base_params}")
+        try:
+            base_params = dict(combo["api_params"])
+            base_params["per_page"] = PER_PAGE
 
-            try:
-                r = session.get(HH_API_URL, params=base_params, headers=api_headers, timeout=REQUEST_TIMEOUT)
-            except Exception as e:
-                raise RuntimeError(f"{prefix} HH request failed on page={page}: {e}") from e
+            api_headers = {
+                "Referer": referer,
+                "Origin": "https://hh.ru",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+            }
 
-            if r.status_code != 200:
-                body_preview = r.text[:500]
-                if r.status_code in (401, 403):
-                    print(f"{prefix} API вернул {r.status_code}, переключаемся на HTML fallback")
-                    all_rows.extend(fetch_html_fallback(session, combo, snapshot_id, prefix, referer))
+            for page in range(MAX_PAGES):
+                base_params["page"] = page
+                print(f"{prefix} fetching page={page} params={base_params}")
+
+                try:
+                    r = session.get(HH_API_URL, params=base_params, headers=api_headers, timeout=REQUEST_TIMEOUT)
+                except Exception as e:
+                    raise RuntimeError(f"{prefix} HH request failed on page={page}: {e}") from e
+
+                if r.status_code != 200:
+                    if r.status_code in (401, 403):
+                        print(f"{prefix} API вернул {r.status_code}, переключаемся на HTML fallback")
+                        # session передаётся в fallback — не создаём новый
+                        all_rows.extend(fetch_html_fallback(session, combo, snapshot_id, prefix, referer))
+                        break
+                    raise RuntimeError(
+                        f"{prefix} HH вернул {r.status_code} на page={page}. "
+                        f"URL={r.url} | body={r.text[:500]}"
+                    )
+
+                data = r.json()
+                items = data.get("items", [])
+                total_pages = data.get("pages", 0)
+                found = data.get("found", 0)
+                print(f"{prefix} page={page} got {len(items)} items (total found={found}, pages={total_pages})")
+
+                if not items:
                     break
-                raise RuntimeError(
-                    f"{prefix} HH вернул {r.status_code} на page={page}. "
-                    f"URL={r.url} | body={body_preview}"
-                )
 
-            data = r.json()
-            items = data.get("items", [])
-            total_pages = data.get("pages", 0)
-            found = data.get("found", 0)
-            print(f"{prefix} page={page} got {len(items)} items (total found={found}, pages={total_pages})")
+                for vac in items:
+                    all_rows.append({
+                        "snapshot_id": snapshot_id,
+                        "search_text": role,
+                        "search_area": area,
+                        "page_num":    page,
+                        "vacancy_id":  str(vac.get("id", "")),
+                        "raw_json":    json.dumps(vac, ensure_ascii=False),
+                    })
 
-            if not items:
-                break
+                if page >= total_pages - 1:
+                    print(f"{prefix} последняя страница ({total_pages-1}), стоп")
+                    break
+                time.sleep(random.uniform(0.4, 0.9))
 
-            for vac in items:
-                all_rows.append({
-                    "snapshot_id": snapshot_id,
-                    "search_text": role,
-                    "search_area": area,
-                    "page_num":    page,
-                    "vacancy_id":  str(vac.get("id", "")),
-                    "raw_json":    json.dumps(vac, ensure_ascii=False),
-                })
-
-            if page >= total_pages - 1:
-                print(f"{prefix} последняя страница ({total_pages-1}), стоп")
-                break
-            time.sleep(random.uniform(0.4, 0.9))
+        finally:
+            # Закрываем session в любом случае — освобождаем libcurl-handle
+            try:
+                session.close()
+                print(f"{prefix} session closed")
+            except Exception:
+                pass
 
         print(f"{prefix} fetched total {len(all_rows)} vacancies")
 
@@ -465,20 +499,18 @@ def hh_vacancies_snapshot():
             print(f"  {r['role']:25s} / {r['area']:8s}  →  {r['inserted']:5d} rows")
         return {"total_inserted": total}
 
-    # ---- граф зависимостей ----
-    snap_id  = make_snapshot_id()
-    combos   = search_params()
-    results  = ingest_combo.partial(snapshot_id=snap_id).expand(combo=combos)
-    total    = report_total(results)
+    snap_id = make_snapshot_id()
+    combos  = search_params()
+    results = ingest_combo.partial(snapshot_id=snap_id).expand(combo=combos)
+    total   = report_total(results)
 
-    # Запускаем T-часть (dbt) автоматически после успешного ingest.
-    # wait_for_completion=False — не блокируем, dbt_hh_transform живёт независимо.
     trigger_dbt = TriggerDagRunOperator(
         task_id="trigger_dbt_transform",
         trigger_dag_id="dbt_hh_transform",
         wait_for_completion=False,
         reset_dag_run=True,
         poke_interval=30,
+        conf={"snapshot_id": "{{ ti.xcom_pull(task_ids='make_snapshot_id') }}"},
     )
     total >> trigger_dbt
 

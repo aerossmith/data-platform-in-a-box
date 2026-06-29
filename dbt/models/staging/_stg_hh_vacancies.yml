@@ -22,30 +22,44 @@ models:
           - not_null
           - accepted_values:
               values: ['DevOps Engineer', 'Platform Engineer']
+              where: &last_complete_snapshot >
+                snapshot_id = (
+                  SELECT snapshot_id
+                  FROM dpib.bronze_hh_vacancies
+                  GROUP BY snapshot_id
+                  HAVING uniqExact(concat(search_text, '|', search_area)) = 6
+                  ORDER BY max(ingested_at) DESC
+                  LIMIT 1
+                )
       - name: search_area
         description: "Региональный срез"
         data_tests:
           - not_null
           - accepted_values:
               values: ['msk', 'spb', 'remote']
+              where: *last_complete_snapshot
       - name: source_mode
         description: "html_fallback или api (по умолчанию api если в payload пусто)"
         data_tests:
           - not_null
           - accepted_values:
               values: ['html_fallback', 'api']
+              where: *last_complete_snapshot
       - name: detail_status
         description: "ok, captcha, error, http_XXX, not_fetched_limit, disabled или NULL"
       - name: title
         description: "Название вакансии"
         data_tests:
-          - not_null
+          - not_null:
+              where: *last_complete_snapshot
       - name: quality_score
         description: "4 — detail ok, 3 — captcha, 2 — html, 1 — api, 0 — unknown"
         data_tests:
-          - not_null
+          - not_null:
+              where: *last_complete_snapshot
           - accepted_values:
               values: [0, 1, 2, 3, 4]
+              where: *last_complete_snapshot
       - name: skills
         description: "Массив навыков из detail-страницы. Часто пустой."
       - name: has_detail

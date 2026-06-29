@@ -21,27 +21,26 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow_pass@postgres:5432/airflow_meta
-    AIRFLOW__CELERY__WORKER_CONCURRENCY: "2"
+    # concurrency=1: ingest_combo тянет detail-страницы и пишет в ClickHouse;
+    # при concurrency=2 два параллельных воркера одновременно делают INSERT
+    # когда ClickHouse уже под нагрузкой → MEMORY_LIMIT_EXCEEDED + SIGKILL.
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: "1"
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
-    # ---- Метрики Airflow → StatsD (statsd-exporter в профиле core) ----
     AIRFLOW__METRICS__STATSD_ON: "true"
     AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
     AIRFLOW__METRICS__STATSD_PORT: "9125"
     AIRFLOW__METRICS__STATSD_PREFIX: airflow
-    # ---- ClickHouse ----
     DPIB_CLICKHOUSE_HOST: clickhouse
     DPIB_CLICKHOUSE_PORT: "8123"
     DPIB_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-dpib}
     DPIB_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dpib_pass}
     DPIB_CLICKHOUSE_DB: ${CLICKHOUSE_DB:-dpib}
-    # ---- HH.ru ingest — настройки парсера (переопределяются через .env) ----
     DPIB_HH_IMPERSONATE: ${DPIB_HH_IMPERSONATE:-chrome120}
     DPIB_HH_HTML_FALLBACK_MAX_PAGES: ${DPIB_HH_HTML_FALLBACK_MAX_PAGES:-5}
     DPIB_HH_FETCH_DETAILS: ${DPIB_HH_FETCH_DETAILS:-true}
     DPIB_HH_DETAIL_MAX_PER_COMBO: ${DPIB_HH_DETAIL_MAX_PER_COMBO:-100}
     DPIB_HH_DETAIL_PAUSE_MIN_SEC: ${DPIB_HH_DETAIL_PAUSE_MIN_SEC:-0.2}
     DPIB_HH_DETAIL_PAUSE_MAX_SEC: ${DPIB_HH_DETAIL_PAUSE_MAX_SEC:-0.6}
-    # ---- Пакеты при старте (в проде собирать кастомный образ) ----
     _PIP_ADDITIONAL_REQUIREMENTS: >-
       clickhouse-connect==0.7.19
       requests==2.32.4
@@ -126,7 +125,8 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
-    mem_limit: 2g
+    # 3g: при 2g ClickHouse достигал 1.92/2g и отклонял INSERT с MEMORY_LIMIT_EXCEEDED
+    mem_limit: 3g
     networks:
       - dpib_net
 
@@ -148,9 +148,6 @@ services:
     networks:
       - dpib_net
 
-  # StatsD exporter живёт в core, а не в monitoring — потому что он принимает
-  # UDP-метрики от Airflow. Без него Airflow шлёт пакеты в никуда при запуске
-  # без профиля monitoring. Prometheus скрапит его когда monitoring поднят.
   statsd-exporter:
     image: prom/statsd-exporter:v0.27.1
     container_name: dpib-statsd-exporter
@@ -370,7 +367,8 @@ services:
         condition: service_completed_successfully
       airflow-api-server:
         condition: service_healthy
-    mem_limit: 1g
+    # 1.5g: при 1g воркер убивался SIGKILL при одновременных detail-fetch + INSERT
+    mem_limit: 1536m
 
 
 networks:

@@ -3,13 +3,14 @@ dbt_hh_transform — T в паттерне ELT.
 Запускается через TriggerDagRunOperator из hh_vacancies_snapshot.
 Цепочка: check_bronze → dbt_deps → staging → test → silver → test → gold → check_silver
 
-Решение read-only монтирования /opt/airflow/dbt:
-  Копируем только нужные файлы проекта в /tmp/dbt-project (без .venv, logs, target).
+snapshot_id:
+  Читается из dag_run.conf["snapshot_id"] (передан из ingest через TriggerDagRunOperator).
+  При ручном запуске без conf — fallback на последний ПОЛНЫЙ снапшот (6 комбинаций).
+  check_bronze явно проваливается если snapshot_id частичный (< 6 комбинаций).
 
-Кеш dbt deps:
-  Пакеты хранятся в /tmp/dbt-packages-cache — устанавливаются один раз
-  при первом запуске, потом просто копируются из кеша (~секунды вместо 2-3 минут).
-  Кеш сбрасывается только при рестарте контейнера.
+Память:
+  threads=1 задан в dbt/profiles.yml. Staging-view читает bronze с JSONExtract.
+  Тесты ограничены последним полным snapshot через where в _stg_hh_vacancies.yml.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ DBT_SRC       = "/opt/airflow/dbt"
 DBT_TMP       = "/tmp/dbt-project"
 DBT_PKG_CACHE = "/tmp/dbt-packages-cache"
 PF            = f"--profiles-dir {DBT_TMP} --no-version-check"
+
+EXPECTED_COMBOS = 6  # DevOps + Platform × msk + spb + remote
 
 CH_HOST     = os.environ.get("DPIB_CLICKHOUSE_HOST",     "clickhouse")
 CH_PORT     = int(os.environ.get("DPIB_CLICKHOUSE_PORT", "8123"))
@@ -55,43 +58,84 @@ def _ch():
 def dbt_hh_transform():
 
     @task
-    def check_bronze() -> dict[str, Any]:
-        """Проверяем что в bronze есть свежие данные перед запуском dbt."""
+    def check_bronze(**context) -> dict[str, Any]:
+        """
+        1. Читает snapshot_id из dag_run.conf (TriggerDagRunOperator путь).
+        2. При ручном запуске без conf — ищет последний ПОЛНЫЙ снапшот
+           (uniqExact(search_text||'|'||search_area) = 6).
+        3. Явно падает если snapshot частичный (< 6 комбинаций).
+           Это защита silver от неполных данных.
+        """
         client = _ch()
-        result = client.query("""
+
+        dag_run = context.get("dag_run")
+        conf_snapshot_id = None
+        if dag_run and dag_run.conf:
+            conf_snapshot_id = dag_run.conf.get("snapshot_id")
+
+        if conf_snapshot_id:
+            print(f"[check_bronze] snapshot_id из dag_run.conf: {conf_snapshot_id}")
+            snapshot_id = conf_snapshot_id
+        else:
+            print(f"[check_bronze] conf пустой — ищем последний полный снапшот ({EXPECTED_COMBOS} комбинаций)")
+            latest = client.query(f"""
+                SELECT snapshot_id
+                FROM dpib.bronze_hh_vacancies
+                GROUP BY snapshot_id
+                HAVING uniqExact(concat(search_text, '|', search_area)) = {EXPECTED_COMBOS}
+                ORDER BY max(ingested_at) DESC
+                LIMIT 1
+            """)
+            if not latest.result_rows:
+                raise RuntimeError(
+                    f"Не найден ни один полный снапшот с {EXPECTED_COMBOS} комбинациями в bronze. "
+                    f"Запустите ingest и дождитесь success всех {EXPECTED_COMBOS} ingest_combo."
+                )
+            snapshot_id = str(latest.result_rows[0][0])
+            print(f"[check_bronze] Fallback snapshot_id: {snapshot_id}")
+
+        # Проверяем количество комбинаций в выбранном снапшоте
+        combo_check = client.query(f"""
             SELECT
-                snapshot_id,
+                uniqExact(concat(search_text, '|', search_area)) AS combos,
                 count()          AS rows,
                 uniq(vacancy_id) AS unique_vacancies,
                 min(ingested_at) AS first_row,
                 max(ingested_at) AS last_row
             FROM dpib.bronze_hh_vacancies
-            WHERE snapshot_id = (
-                SELECT snapshot_id FROM dpib.bronze_hh_vacancies
-                ORDER BY ingested_at DESC LIMIT 1
+            WHERE snapshot_id = {{snapshot_id:UUID}}
+        """, parameters={"snapshot_id": snapshot_id})
+
+        if not combo_check.result_rows or combo_check.result_rows[0][1] == 0:
+            raise RuntimeError(
+                f"snapshot_id={snapshot_id} не найден в bronze_hh_vacancies."
             )
-            GROUP BY snapshot_id
-        """)
-        if not result.result_rows:
-            raise RuntimeError("bronze_hh_vacancies пустой — нечего трансформировать")
-        row = result.result_rows[0]
+
+        row = combo_check.result_rows[0]
+        combos = row[0]
+
+        if combos < EXPECTED_COMBOS:
+            raise RuntimeError(
+                f"snapshot_id={snapshot_id} ЧАСТИЧНЫЙ: {combos}/{EXPECTED_COMBOS} комбинаций. "
+                f"Трансформацию не запускаем — silver получит неполные данные. "
+                f"Дождитесь успешного ingest со всеми {EXPECTED_COMBOS} комбинациями."
+            )
+
         stats = {
-            "snapshot_id":        str(row[0]),
+            "snapshot_id":        snapshot_id,
+            "combos":             combos,
             "bronze_rows":        row[1],
             "bronze_unique_vacs": row[2],
             "first_row":          str(row[3]),
             "last_row":           str(row[4]),
         }
-        print("\n[check_bronze] Последний снапшот:")
+
+        print(f"\n[check_bronze] Снапшот для трансформации:")
         for k, v in stats.items():
             print(f"  {k}: {v}")
+
         return stats
 
-    # Копируем только нужные файлы проекта (без .venv, logs, target, dbt_packages).
-    # .venv весит ~145 МБ и не нужен dbt в контейнере — там dbt уже установлен
-    # через _PIP_ADDITIONAL_REQUIREMENTS.
-    # Кеш пакетов: устанавливаем один раз, при следующих запусках восстанавливаем
-    # из /tmp/dbt-packages-cache (~секунды вместо 2-3 минут).
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=f"""
@@ -101,7 +145,6 @@ echo "[dbt_deps] Копируем проект (без .venv, logs, target, dbt_
 rm -rf {DBT_TMP}
 mkdir -p {DBT_TMP}
 
-# Копируем только то что нужно dbt для работы
 for item in models macros tests seeds analyses snapshots \
             dbt_project.yml profiles.yml packages.yml; do
     src="{DBT_SRC}/$item"
@@ -113,13 +156,11 @@ done
 echo "[dbt_deps] Проект скопирован, размер: $(du -sh {DBT_TMP} | cut -f1)"
 
 if [ -d {DBT_PKG_CACHE} ]; then
-    echo "[dbt_deps] Кеш найден — восстанавливаем пакеты из {DBT_PKG_CACHE}"
+    echo "[dbt_deps] Кеш найден — восстанавливаем пакеты"
     cp -r {DBT_PKG_CACHE} {DBT_TMP}/dbt_packages
-    echo "[dbt_deps] Пакеты восстановлены из кеша"
 else
-    echo "[dbt_deps] Кеша нет — запускаем dbt deps (первый раз)"
+    echo "[dbt_deps] Кеша нет — запускаем dbt deps"
     cd {DBT_TMP} && dbt deps {PF} 2>&1
-    echo "[dbt_deps] Кешируем пакеты в {DBT_PKG_CACHE}"
     cp -r {DBT_TMP}/dbt_packages {DBT_PKG_CACHE}
     echo "[dbt_deps] Кеш сохранён"
 fi
@@ -139,8 +180,15 @@ fi
 
     @task
     def check_silver(bronze_stats: dict[str, Any]) -> dict[str, Any]:
-        """Контрольный SELECT: grain, качество payload, описания, навыки."""
+        """
+        Финальная верификация:
+        - snapshot из bronze присутствует в silver
+        - grain (snapshot_id, vacancy_id) уникален
+        - логируем bronze → silver статистику
+        """
         client = _ch()
+        snapshot_id = bronze_stats["snapshot_id"]
+
         r = client.query("""
             SELECT
                 count()                            AS silver_rows,
@@ -152,32 +200,41 @@ fi
                 round(avg(description_length))     AS avg_desc_len
             FROM dpib_silver.silver_hh_vacancies
             WHERE snapshot_id = {snapshot_id:UUID}
-        """, parameters={"snapshot_id": bronze_stats["snapshot_id"]})
+        """, parameters={"snapshot_id": snapshot_id})
 
         row = r.result_rows[0] if r.result_rows else (0,) * 7
         silver_rows, unique_keys = row[0], row[1]
-        grain_ok = silver_rows == unique_keys
+        grain_ok          = silver_rows == unique_keys
+        snapshot_in_silver = silver_rows > 0
 
         def pct(n):
             return f"{round(n / silver_rows * 100, 1)}%" if silver_rows else "0%"
 
         stats = {
-            "silver_rows":   silver_rows,
-            "unique_keys":   unique_keys,
-            "grain_ok":      grain_ok,
-            "detail_ok_pct": pct(row[2]),
-            "desc_pct":      pct(row[4]),
-            "skills_pct":    pct(row[5]),
-            "avg_desc_len":  row[6],
+            "snapshot_id":       snapshot_id,
+            "bronze_rows":       bronze_stats["bronze_rows"],
+            "silver_rows":       silver_rows,
+            "grain_ok":          grain_ok,
+            "snapshot_in_silver": snapshot_in_silver,
+            "detail_ok_pct":     pct(row[2]),
+            "desc_pct":          pct(row[4]),
+            "skills_pct":        pct(row[5]),
+            "avg_desc_len":      row[6],
         }
-        print(f"\n[check_silver] snapshot={bronze_stats['snapshot_id']}:")
-        print(f"  bronze → silver: {bronze_stats['bronze_rows']} → {silver_rows}")
-        print(f"  grain уникален:  {grain_ok}")
-        print(f"  detail_status=ok: {row[2]} ({pct(row[2])})")
-        print(f"  есть description: {row[4]} ({pct(row[4])})")
-        print(f"  есть skills:      {row[5]} ({pct(row[5])})")
+
+        print(f"\n[check_silver] snapshot_id={snapshot_id}:")
+        print(f"  bronze_rows → silver_rows: {bronze_stats['bronze_rows']} → {silver_rows}")
+        print(f"  snapshot присутствует в silver: {snapshot_in_silver}")
+        print(f"  grain уникален: {grain_ok}")
+        print(f"  detail_status=ok:  {row[2]} ({pct(row[2])})")
+        print(f"  есть description:  {row[4]} ({pct(row[4])})")
+        print(f"  есть skills:       {row[5]} ({pct(row[5])})")
         print(f"  средняя длина описания: {row[6]} символов")
 
+        if not snapshot_in_silver:
+            raise RuntimeError(
+                f"snapshot_id={snapshot_id} есть в bronze, но отсутствует в silver"
+            )
         if not grain_ok:
             raise RuntimeError(
                 f"Нарушен grain silver: rows={silver_rows} != unique_keys={unique_keys}"

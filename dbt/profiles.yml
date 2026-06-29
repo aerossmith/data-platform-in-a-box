@@ -15,6 +15,8 @@ dpib_dbt:
       verify: False
       connect_timeout: 10
       send_receive_timeout: 300
-      threads: 4
+      # Последовательное выполнение: параллельные JSONExtract-тесты staging
+      # упирались в лимит памяти ClickHouse.
+      threads: 1
       use_lw_deletes: False
       check_exchange: False

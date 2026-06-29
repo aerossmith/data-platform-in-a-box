@@ -11,24 +11,28 @@
 -- silver_hh_vacancies
 -- ================================================================
 -- Grain: (snapshot_id, vacancy_id) — внутри одного снапшота одна
--- вакансия = одна строка. Между снапшотами повторение — это
--- лайфсайкл вакансии (новая версия данных, статус и т.д.).
+-- вакансия = одна строка. Между снапшотами повторение — лайфсайкл.
 --
--- Логика выбора «лучшей» строки из множества bronze-рядов одной
--- вакансии в одном снапшоте:
---   ORDER BY quality_score DESC,
---            description_length DESC,
---            ingested_at DESC
+-- ЗАЩИТА ОТ ЧАСТИЧНЫХ СНАПШОТОВ:
+-- complete_snapshots фильтрует только снапшоты где присутствуют
+-- все 6 комбинаций (2 роли × 3 региона). Частичные снапшоты
+-- (например 4/6 из-за упавшего ingest) в silver не попадают.
+-- Данные в bronze при этом не удаляются.
 --
--- Т.е. сначала тот, у кого detail_status='ok'; среди равных —
--- у кого более длинное description; среди равных — последний по
--- времени insert.
---
--- Дополнительно агрегируем matched_roles / matched_areas — под
--- какие комбинации поиска вакансия попадала в этом снапшоте.
+-- Логика выбора «лучшей» строки из множества bronze-рядов:
+--   ORDER BY quality_score DESC, description_length DESC, ingested_at DESC
 -- ================================================================
 
-WITH best_row AS (
+WITH complete_snapshots AS (
+    -- Только снапшоты где все 6 комбинаций присутствуют.
+    -- uniqExact конкатенации исключает частичные прогоны.
+    SELECT snapshot_id
+    FROM dpib.bronze_hh_vacancies
+    GROUP BY snapshot_id
+    HAVING uniqExact(concat(search_text, '|', search_area)) = 6
+),
+
+best_row AS (
     SELECT
         snapshot_id,
         vacancy_id,
@@ -55,7 +59,6 @@ WITH best_row AS (
         quality_score,
         has_detail,
         ingested_at,
-        -- Выбираем лучшую строку для каждой пары (snapshot_id, vacancy_id)
         row_number() OVER (
             PARTITION BY snapshot_id, vacancy_id
             ORDER BY
@@ -64,10 +67,11 @@ WITH best_row AS (
                 ingested_at DESC
         ) AS rn
     FROM {{ ref('stg_hh_vacancies') }}
+    -- Читаем только полные снапшоты
+    WHERE snapshot_id IN (SELECT snapshot_id FROM complete_snapshots)
 ),
 
 matched AS (
-    -- Под какие search_text / search_area попадала вакансия в этом снапшоте
     SELECT
         snapshot_id,
         vacancy_id,
@@ -75,14 +79,13 @@ matched AS (
         groupUniqArray(search_area) AS matched_areas,
         count() AS matched_rows
     FROM {{ ref('stg_hh_vacancies') }}
+    WHERE snapshot_id IN (SELECT snapshot_id FROM complete_snapshots)
     GROUP BY snapshot_id, vacancy_id
 )
 
 SELECT
     b.snapshot_id          AS snapshot_id,
     b.vacancy_id           AS vacancy_id,
-
-    -- Лучшая строка
     b.title                AS title,
     b.employer_name        AS employer_name,
     b.vacancy_url          AS vacancy_url,
@@ -106,8 +109,6 @@ SELECT
     b.quality_score        AS quality_score,
     b.has_detail           AS has_detail,
     b.ingested_at          AS ingested_at,
-
-    -- Агрегаты «под какие поиски попала»
     m.matched_roles        AS matched_roles,
     m.matched_areas        AS matched_areas,
     m.matched_rows         AS matched_rows
