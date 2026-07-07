@@ -36,11 +36,16 @@ x-airflow-common: &airflow-common
     DPIB_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-dpib_pass}
     DPIB_CLICKHOUSE_DB: ${CLICKHOUSE_DB:-dpib}
     DPIB_HH_IMPERSONATE: ${DPIB_HH_IMPERSONATE:-chrome120}
+    # Необязательный официальный режим: токен зарегистрированного приложения
+    # и осмысленный User-Agent. Пустые значения сохраняют прежнее поведение.
+    DPIB_HH_ACCESS_TOKEN: ${DPIB_HH_ACCESS_TOKEN:-}
+    DPIB_HH_USER_AGENT: ${DPIB_HH_USER_AGENT:-}
     DPIB_HH_HTML_FALLBACK_MAX_PAGES: ${DPIB_HH_HTML_FALLBACK_MAX_PAGES:-5}
     DPIB_HH_FETCH_DETAILS: ${DPIB_HH_FETCH_DETAILS:-true}
     DPIB_HH_DETAIL_MAX_PER_COMBO: ${DPIB_HH_DETAIL_MAX_PER_COMBO:-100}
     DPIB_HH_DETAIL_PAUSE_MIN_SEC: ${DPIB_HH_DETAIL_PAUSE_MIN_SEC:-0.2}
     DPIB_HH_DETAIL_PAUSE_MAX_SEC: ${DPIB_HH_DETAIL_PAUSE_MAX_SEC:-0.6}
+    DPIB_TRUDVSEM_MAX_PAGES: ${DPIB_TRUDVSEM_MAX_PAGES:-5}
     _PIP_ADDITIONAL_REQUIREMENTS: >-
       clickhouse-connect==0.7.19
       requests==2.32.4

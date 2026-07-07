@@ -1,0 +1,46 @@
+version: 2
+
+models:
+  - name: stg_trudvsem_vacancies
+    description: >
+      Staging над bronze_trudvsem_vacancies («Работа России»).
+      Один формат payload из открытого API, грань один-к-одному с bronze:
+      (snapshot_id, search_text, vacancy_id, page_num). Дедупликация — в silver.
+    columns:
+      - name: snapshot_id
+        description: "UUID запуска DAG"
+        data_tests:
+          - not_null
+      - name: vacancy_id
+        description: "UUID вакансии на портале. НЕ уникален в этой view."
+        data_tests:
+          - not_null
+      - name: search_text
+        description: "Поисковый запрос из SEARCH_TEXTS DAG-а"
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['DevOps', 'девопс', 'SRE', 'инженер по инфраструктуре']
+              where: &last_complete_snapshot >
+                snapshot_id = (
+                  SELECT snapshot_id
+                  FROM dpib.bronze_trudvsem_vacancies
+                  GROUP BY snapshot_id
+                  HAVING uniqExact(search_text) = 4
+                  ORDER BY max(ingested_at) DESC
+                  LIMIT 1
+                )
+      - name: title
+        description: "job-name — название вакансии"
+        data_tests:
+          - not_null:
+              where: *last_complete_snapshot
+      - name: region_name
+        description: "Регион из справочника госпортала"
+        data_tests:
+          - not_null:
+              where: *last_complete_snapshot
+      - name: salary_min
+        description: "Нижняя граница зарплаты, число"
+      - name: creation_date
+        description: "Дата публикации вакансии"

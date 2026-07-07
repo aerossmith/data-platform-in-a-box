@@ -1,0 +1,35 @@
+version: 2
+
+models:
+  - name: silver_trudvsem_vacancies
+    description: >
+      Дедуплицированный слой вакансий «Работы России».
+      Grain: (snapshot_id, vacancy_id) — тест ниже это гарантирует.
+      Только полные снапшоты (все 4 поисковых запроса).
+      matched_queries показывает, по каким запросам вакансия нашлась.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - snapshot_id
+            - vacancy_id
+    columns:
+      - name: snapshot_id
+        data_tests:
+          - not_null
+      - name: vacancy_id
+        data_tests:
+          - not_null
+      - name: title
+        description: "Название вакансии (job-name)"
+        data_tests:
+          - not_null
+      - name: region_name
+        description: "Регион госпортала"
+      - name: salary_min
+        description: "Нижняя граница зарплаты. NULL если не указана."
+      - name: matched_queries
+        description: "Массив поисковых запросов, по которым вакансия попала в снапшот"
+      - name: matched_rows
+        description: "Сколько bronze-строк слилось в одну silver-строку"
+        data_tests:
+          - not_null

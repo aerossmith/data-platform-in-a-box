@@ -6,6 +6,7 @@
 # Логи и временные файлы
 *.log
 *.tmp
+orchestration/logs/
 .DS_Store
 Thumbs.db
 

@@ -1,6 +1,7 @@
 # dbt — трансформации bronze → silver → gold
 
-dbt-проект поверх `dpib.bronze_hh_vacancies` (ClickHouse).
+dbt-проект поверх Bronze-таблиц вакансий в ClickHouse:
+`dpib.bronze_hh_vacancies` и `dpib.bronze_trudvsem_vacancies`.
 Не трогает ingest, не меняет docker-compose. Читает bronze,
 пишет модели в отдельные базы `dpib_silver` и `dpib_gold`.
 
@@ -10,8 +11,8 @@ dbt-проект поверх `dpib.bronze_hh_vacancies` (ClickHouse).
 
 | База | Что внутри | Кто пишет |
 |---|---|---|
-| `dpib` | `bronze_hh_vacancies` | DAG `hh_vacancies_snapshot` |
-| `dpib_silver` | `stg_hh_vacancies` (view), `silver_hh_vacancies` (table) | dbt |
+| `dpib` | `bronze_hh_vacancies`, `bronze_trudvsem_vacancies` | ingest DAG-и |
+| `dpib_silver` | `stg_hh_vacancies`, `stg_trudvsem_vacancies` (view), `silver_hh_vacancies`, `silver_trudvsem_vacancies` (table) | dbt |
 | `dpib_gold` | `gold_skills_top` (table) | dbt |
 
 Базы создаются при первом старте ClickHouse через `init/clickhouse/03_create_databases.sql`.
@@ -26,9 +27,15 @@ bronze_hh_vacancies   dpib        append-only, raw_json (не трогаем)
         |
 stg_hh_vacancies      dpib_silver view: JSONExtract + quality_score + has_detail
         |
-silver_hh_vacancies   dpib_silver table: dedup по (snapshot_id, vacancy_id)
+silver_hh_vacancies   dpib_silver table: dedup + фильтр complete_snapshots
         |
 gold_skills_top       dpib_gold   table: топ навыков по latest-снапшоту
+
+bronze_trudvsem_vacancies   dpib        append-only, raw_json (не трогаем)
+        |
+stg_trudvsem_vacancies      dpib_silver view: JSONExtract открытого API
+        |
+silver_trudvsem_vacancies   dpib_silver table: dedup + фильтр complete_snapshots по 4 запросам
 ```
 
 ---
@@ -51,11 +58,56 @@ dbt build --profiles-dir .   # run + test за один шаг
 
 ## Запуск через Airflow
 
-DAG `dbt_hh_transform` запускается автоматически после `hh_vacancies_snapshot`.
-Можно запустить вручную: `make airflow-trigger DAG=dbt_hh_transform`.
+DAG `dbt_hh_transform` запускается автоматически после `hh_vacancies_snapshot`
+через `TriggerDagRunOperator` с `conf={"snapshot_id": ...}`. Ручной запуск:
+`make airflow-trigger DAG=dbt_hh_transform`.
 
 Кеш dbt_packages живёт в `/tmp/dbt-packages-cache` внутри воркер-контейнера.
 Первый запуск ~2-3 мин (скачивает dbt_utils), последующие ~5 сек.
+
+---
+
+## Защита от частичных снапшотов
+
+Если ingest упал на N из 6 комбинаций — bronze получит частичный снапшот.
+В этом случае `silver` НЕ должен подхватывать неполные данные. Защита на трёх уровнях:
+
+**1. Уровень silver-модели:** `silver_hh_vacancies.sql` содержит CTE
+```sql
+WITH complete_snapshots AS (
+    SELECT snapshot_id FROM dpib.bronze_hh_vacancies
+    GROUP BY snapshot_id
+    HAVING uniqExact(concat(search_text, '|', search_area)) = 6
+)
+```
+и фильтрует `WHERE snapshot_id IN (SELECT snapshot_id FROM complete_snapshots)`.
+
+**2. Уровень staging-тестов:** в `_stg_hh_vacancies.yml` тесты
+`accepted_values` / `not_null` имеют `where:` фильтр на последний полный снапшот.
+Это и защищает от шума, и предотвращает `MEMORY_LIMIT_EXCEEDED` (тесты не сканируют
+всю историю view с `JSONExtract`).
+
+**3. Уровень Airflow:** `check_bronze` в `dbt_hh_transform` падает с понятной
+ошибкой если переданный `snapshot_id` имеет `combos < 6`. Это срабатывает
+до запуска dbt — экономит время.
+
+**Старые частичные снапшоты в bronze не удалены** — они исторический факт.
+Все три механизма их просто игнорируют.
+
+---
+
+## Производительность
+
+**`threads: 1` в `dbt/profiles.yml`** (не флагом в командах).
+
+Причина: параллельные `accepted_values` / `not_null` тесты на staging-view с
+`JSONExtract` упирались в `MEMORY_LIMIT_EXCEEDED` ClickHouse. `--threads`
+не поддерживается в `dbt deps`, поэтому держим настройку в профиле — она
+применяется только к `run` / `test`.
+
+**Кеш dbt_packages:** при запуске через Airflow первый `dbt_deps` устанавливает
+пакеты в `/tmp/dbt-packages-cache`, последующие просто `cp -r` из кеша.
+Сэкономили ~2-3 минуты на каждый ран.
 
 ---
 
@@ -66,10 +118,26 @@ make clickhouse-cli
 ```
 
 ```sql
+-- Какой последний полный снапшот?
+SELECT snapshot_id, uniqExact(concat(search_text,'|',search_area)) AS combos
+FROM dpib.bronze_hh_vacancies
+GROUP BY snapshot_id
+ORDER BY max(ingested_at) DESC LIMIT 3;
+
 -- Grain silver соблюдён?
 SELECT count() AS rows, uniq((snapshot_id, vacancy_id)) AS unique_keys
 FROM dpib_silver.silver_hh_vacancies;
 -- rows должно == unique_keys
+
+-- Партиал в silver попал? (должно быть 0)
+SELECT count() AS partial_rows_in_silver
+FROM dpib_silver.silver_hh_vacancies s
+WHERE NOT EXISTS (
+    SELECT 1 FROM dpib.bronze_hh_vacancies b
+    WHERE b.snapshot_id = s.snapshot_id
+    GROUP BY b.snapshot_id
+    HAVING uniqExact(concat(b.search_text, '|', b.search_area)) = 6
+);
 
 -- Распределение качества payload
 SELECT source_mode, detail_status, count()
@@ -89,18 +157,22 @@ ORDER BY vacancies_count DESC LIMIT 20;
 ```
 dbt/
 ├── dbt_project.yml              schema per layer: silver / gold
-├── profiles.yml                 DPIB_CLICKHOUSE_* env vars
+├── profiles.yml                 DPIB_CLICKHOUSE_* env vars + threads=1
 ├── packages.yml                 dbt_utils (unique_combination_of_columns)
 ├── macros/
 │   └── generate_schema_name.sql silver → dpib_silver, gold → dpib_gold
 └── models/
     ├── staging/
     │   ├── _sources.yml         bronze в базе dpib + data_tests
-    │   ├── _stg_hh_vacancies.yml
-    │   └── stg_hh_vacancies.sql JSONExtract + coalesce по source_mode/detail_status
+    │   ├── _stg_hh_vacancies.yml тесты с where = последний полный snapshot
+    │   ├── stg_hh_vacancies.sql  JSONExtract + coalesce по source_mode
+    │   ├── _stg_trudvsem_vacancies.yml
+    │   └── stg_trudvsem_vacancies.sql JSONExtract payload «Работы России»
     ├── silver/
     │   ├── _silver_hh_vacancies.yml
-    │   └── silver_hh_vacancies.sql  row_number() + matched_roles/areas
+    │   ├── silver_hh_vacancies.sql  CTE complete_snapshots + row_number()
+    │   ├── _silver_trudvsem_vacancies.yml
+    │   └── silver_trudvsem_vacancies.sql dedup по (snapshot_id, vacancy_id)
     └── gold/
         └── gold_skills_top.sql  argMax + ARRAY JOIN по skills
 ```
@@ -132,12 +204,61 @@ dbt/
 
 ---
 
+## Контрольный прогон (для справки)
+
+После всех фиксов (29 июня 2026):
+- snapshot_id `a87ffbd8-cac0-4ac5-a81a-aa1131437cf3` — полный (6 комбинаций)
+- bronze: 432 строки → silver: 380 строк (dedup + best-row)
+- grain (snapshot_id, vacancy_id) уникален
+- staging tests: 17/17 PASS, silver tests: 5/5 PASS
+- partial_rows_in_silver = 0
+- gold_skills_top: 422 строки
+
+---
+
 ## Roadmap
 
-| Шаг | Что | Зачем |
+### Gold-витрины для дашборда «Зарплаты DevOps/Platform Engineer в РФ»
+
+Семь моделей формирующих полноценный аналитический дашборд по образцу
+[исследования рынка Python-вакансий](https://habr.com/ru/articles/1036500/).
+У нас узкий срез (DevOps + Platform), continuous ingest и HTML detail-payload
+с реальным `description` — это даёт точнее результат чем "теги HH = шум",
+на которые жалуется автор статьи.
+
+| # | Модель | Grain | Что показывает |
+|---|---|---|---|
+| 1 | `gold_vacancies_latest` | `vacancy_id` | Single source of truth — latest snapshot per vacancy (база для остальных) |
+| 2 | `gold_salary_by_role_city` | `(role, city, period)` | Медиана / p25 / p75 ЗП в разрезе роль × город. Источник для heatmap |
+| 3 | `gold_salary_dynamics_monthly` | `(role, month)` | Динамика медиан по месяцам. Растёт ли рынок DevOps |
+| 4 | `gold_salary_disclosure_rate` | `(role, period)` | % вакансий с указанной зарплатой. Кто молчит чаще |
+| 5 | `gold_salary_range_width` | `(role, city)` | Ширина вилки `(to-from)/midpoint`. Зрелость рынка |
+| 6 | `gold_skills_growth_trend` | `(skill, month)` | Динамика упоминаний навыков. Что растёт, что падает |
+| 7 | `gold_skills_cooccurrence` | `(skill_a, skill_b)` | Матрица сочетаемости. Источник для networkx-графа |
+| 8 | `gold_market_centralization` | `(city, period)` | Доля города в общем числе вакансий. Москво-центричность |
+
+**Антипаттерны от которых уходим** (из ошибок автора статьи):
+- Фильтр `n < 30` в gold — иначе "Тбилиси DS 450К (n=4)" попадёт в выводы как шум.
+- Использовать `description` + `skills` из detail-payload, не теги HH —
+  у нас `quality_score >= 3` гарантирует наличие реального текста.
+- Использовать `matched_roles` / `matched_areas` из silver — одна вакансия может
+  попасть в разные срезы, не дублировать в подсчётах.
+
+### Технические шаги
+
+| # | Что | Зачем |
 |---|---|---|
-| 1 | `gold_vacancies_latest` | Single source of truth — latest snapshot per vacancy |
-| 2 | `gold_salary_by_role` | Медианы зарплат по ролям и регионам |
-| 3 | `gold_employer_top` | Топ работодателей, retention вакансий |
-| 4 | NER/keywords по description | skills=[] у большинства вакансий |
-| 5 | DAG `dbt_hh_transform` в K8s | Helm + DockerOperator вместо BashOperator |
+| 9 | NER/keywords по `description` | Когда `skills` массив пустой, восстановить навыки из текста |
+| 10 | dbt snapshots для history | Отслеживать изменения salary/title в одной вакансии между снапшотами |
+| 11 | dbt incremental на bronze→silver | Сейчас silver = full table. На длинной истории станет медленным |
+| 12 | DAG `dbt_hh_transform` в K8s | Helm + DockerOperator вместо BashOperator |
+
+
+---
+
+## См. также
+
+- [`../runbooks/elt-memory-and-sigkill-troubleshooting.md`](../runbooks/elt-memory-and-sigkill-troubleshooting.md)
+  — диагностика SIGKILL / MEMORY_LIMIT_EXCEEDED
+- [`../orchestration/README.md`](../orchestration/README.md)
+  — Airflow DAG-и, лимиты, проверки

@@ -51,6 +51,16 @@ ELT-связка: последняя задача `hh_vacancies_snapshot` — `t
 **HTML fallback при 401/403:** парсинг `hh.ru/search/vacancy` через BeautifulSoup.
 По каждой вакансии опционально загружается detail-страница (description, skills, experience).
 
+**Предпочтительный доступ к API:** зарегистрированное приложение и токен
+приложения. Если заданы `DPIB_HH_ACCESS_TOKEN` и `DPIB_HH_USER_AGENT`, DAG
+добавляет официальный заголовок авторизации и осмысленный идентификатор клиента.
+Токен в лог не выводится. Если API всё равно отвечает `401/403`, продолжает
+работать существующий HTML fallback.
+
+HTML fallback следует считать страховкой, а не стабильным контрактом: разметка
+страницы и антибот-защита могут измениться без предупреждения. Поэтому downstream
+различает `source_mode=api` и `source_mode=html_fallback`.
+
 **Retry-safe:** перед INSERT делает SELECT существующих vacancy_id, фильтрует дубли.
 
 **Управление памятью** (важно — решает SIGKILL воркера):
@@ -75,6 +85,11 @@ ELT-связка: последняя задача `hh_vacancies_snapshot` — `t
 ### Настройки через .env
 
 ```env
+# Предпочтительно: зарегистрировать приложение и передать значения через .env.
+# Секрет не добавлять в Git.
+DPIB_HH_ACCESS_TOKEN=
+DPIB_HH_USER_AGENT=
+
 DPIB_HH_IMPERSONATE=chrome120
 DPIB_HH_HTML_FALLBACK_MAX_PAGES=5
 DPIB_HH_FETCH_DETAILS=true
@@ -82,6 +97,37 @@ DPIB_HH_DETAIL_MAX_PER_COMBO=100
 DPIB_HH_DETAIL_PAUSE_MIN_SEC=0.2
 DPIB_HH_DETAIL_PAUSE_MAX_SEC=0.6
 ```
+
+---
+
+## Дополнительные источники вакансий
+
+Каждый источник пишет исходный JSON в отдельную таблицу Bronze. Разные форматы
+не смешиваются до появления проверенного общего контракта в staging/silver.
+Контактные поля людей перед записью удаляются: для аналитики рынка труда они не
+нужны, а хранить лишние персональные данные небезопасно.
+
+| DAG | Таблица Bronze | Доступ |
+|---|---|---|
+| `hh_vacancies_snapshot` | `bronze_hh_vacancies` | API приложения или HTML fallback |
+| `trudvsem_vacancies_snapshot` | `bronze_trudvsem_vacancies` | открытый API без ключа |
+
+Для существующего ClickHouse-тома после запуска сервиса один раз выполнить:
+
+```bash
+make clickhouse-multi-source-bootstrap
+```
+
+Команда использует `CREATE TABLE IF NOT EXISTS`, поэтому не изменяет существующие
+таблицы и данные. Затем можно запустить DAG-и вручную:
+
+```bash
+make airflow-trigger DAG=trudvsem_vacancies_snapshot
+```
+
+Первый этап заканчивается в Bronze. Общий Silver следует строить после получения
+реального payload «Работы России» и сверки полей зарплаты, региона, графика,
+описания и даты публикации с HH.
 
 ---
 
@@ -139,6 +185,12 @@ airflow_celery_*                состояние очереди Celery
 ```bash
 curl -s http://localhost:9102/metrics | grep "^airflow" | head -10
 ```
+
+До добавления алертов на длительность сначала нужно посмотреть фактические имена
+метрик после запуска: StatsD exporter преобразует точки и динамические части имён.
+Порог для `hh_vacancies_snapshot` следует задавать только после нескольких
+плановых запусков, ориентируясь на нормальную длительность, а не на один ручной
+прогон.
 
 ---
 

@@ -47,6 +47,23 @@ groups:
           summary: "Мало места на диске {{ $labels.mountpoint }} ({{ $labels.instance }})"
           description: "Занято > 80% ({{ $value | printf \"%.1f\" }}%)."
 
+  # ---------- Ресурсы контейнеров ----------
+  - name: container_resources
+    rules:
+      - alert: ContainerMemoryNearLimit
+        expr: |
+          (
+            container_memory_working_set_bytes{name=~"dpib-.+"}
+            /
+            container_spec_memory_limit_bytes{name=~"dpib-.+"}
+          ) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Контейнер {{ $labels.name }} близок к лимиту памяти"
+          description: "Рабочий набор памяти превышает 85% лимита контейнера уже 5 минут."
+
   # ---------- PostgreSQL ----------
   - name: postgresql
     rules:
@@ -71,6 +88,20 @@ groups:
   # ---------- ClickHouse ----------
   - name: clickhouse
     rules:
+      - alert: ClickHouseMemoryNearLimit
+        expr: |
+          (
+            ClickHouseAsyncMetrics_CGroupMemoryUsed
+            /
+            ClickHouseAsyncMetrics_CGroupMemoryTotal
+          ) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse близок к лимиту памяти контейнера"
+          description: "ClickHouse использует более 85% доступной cgroup-памяти уже 5 минут."
+
       - alert: ClickHouseTooManyParts
         expr: ClickHouseAsyncMetrics_MaxPartCountForPartition > 300
         for: 10m

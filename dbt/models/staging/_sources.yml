@@ -52,3 +52,14 @@ sources:
             data_type: String
             data_tests:
               - not_null
+      - name: bronze_trudvsem_vacancies
+        description: >
+          Открытые вакансии «Работа России». Записываются отдельным DAG;
+          исходный JSON сохраняется без преобразования.
+        columns:
+          - name: snapshot_id
+            data_tests: [not_null]
+          - name: vacancy_id
+            data_tests: [not_null]
+          - name: raw_json
+            data_tests: [not_null]

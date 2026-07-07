@@ -11,7 +11,7 @@ PROFILE_FLAGS := $(foreach p,$(PROFILES),--profile $(p))
 
 .PHONY: help up down restart status logs ps clean reset psql clickhouse-cli redis-cli \
         airflow-shell airflow-logs airflow-trigger airflow-list-dags airflow-bootstrap \
-        clickhouse-bootstrap
+        clickhouse-bootstrap clickhouse-multi-source-bootstrap
 
 help:  ## показать список команд
 	@echo "Data Platform in a Box"
@@ -101,3 +101,12 @@ clickhouse-bootstrap:  ## создать БД dpib_silver+dpib_gold в рабо�
 		--multiquery < init/clickhouse/03_create_databases.sql
 	@echo ""
 	@echo "Готово. Проверь: docker exec dpib-clickhouse clickhouse-client --query 'SHOW DATABASES'"
+
+clickhouse-multi-source-bootstrap:  ## создать дополнительные Bronze-таблицы в существующем томе
+	@echo "Применяю init/clickhouse/04_multi_source_bronze.sql..."
+	docker exec -i dpib-clickhouse clickhouse-client \
+		--user $${CLICKHOUSE_USER:-dpib} \
+		--password $${CLICKHOUSE_PASSWORD:-dpib_pass} \
+		--multiquery < init/clickhouse/04_multi_source_bronze.sql
+	@echo ""
+	@echo "Готово. Таблицы созданы идемпотентно; существующие данные не изменялись."

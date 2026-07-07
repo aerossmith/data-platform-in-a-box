@@ -40,6 +40,8 @@ HH_SEARCH_URL = "https://hh.ru/search/vacancy"
 HH_API_URL = "https://api.hh.ru/vacancies"
 
 IMPERSONATE_PROFILE = os.environ.get("DPIB_HH_IMPERSONATE", "chrome120")
+HH_ACCESS_TOKEN = os.environ.get("DPIB_HH_ACCESS_TOKEN", "").strip()
+HH_USER_AGENT = os.environ.get("DPIB_HH_USER_AGENT", "").strip()
 
 PER_PAGE = 100
 MAX_PAGES = 20
@@ -394,6 +396,13 @@ def hh_vacancies_snapshot():
                 "Accept": "application/json, text/plain, */*",
                 "X-Requested-With": "XMLHttpRequest",
             }
+            # Официальный режим для зарегистрированного приложения.
+            # Переменные необязательны: без них сохраняется прежнее поведение.
+            if HH_ACCESS_TOKEN:
+                api_headers["Authorization"] = f"Bearer {HH_ACCESS_TOKEN}"
+                print(f"{prefix} API auth: application token configured")
+            if HH_USER_AGENT:
+                api_headers["User-Agent"] = HH_USER_AGENT
 
             for page in range(MAX_PAGES):
                 base_params["page"] = page

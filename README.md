@@ -1,9 +1,13 @@
 # Data Platform in a Box
 
+![Reference architecture: Unified Data Infrastructure](image.png)
+
+> Картинка выше — reference architecture, не буквальная схема текущего compose-стенда.
+
 ![CI](https://github.com/aerossmith/data-platform-in-a-box/actions/workflows/ci.yml/badge.svg)
 
 Локальная DWH/BI платформа в Docker Compose — единый стек для аналитики
-и фундамент для AI/DevOps-проектов. Реальные данные (HH.ru вакансии),
+и фундамент для AI/DevOps-проектов. Реальные данные (HH.ru и «Работа России»),
 медальонная архитектура bronze → silver → gold, полный мониторинг,
 автоматический ELT-конвейер.
 
@@ -20,8 +24,8 @@
 | Инфраструктура | PostgreSQL 16 + ClickHouse 24 + Redis 7 + StatsD-exporter |
 | Мониторинг | Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter |
 | Оркестрация | Airflow 3.x с CeleryExecutor (6 контейнеров) |
-| Ingest (E+L) | DAG `hh_vacancies_snapshot`: HH.ru → `bronze_hh_vacancies` каждые 4 часа |
-| Transform (T) | DAG `dbt_hh_transform`: bronze → silver → gold (запускается автоматически) |
+| Ingest (E+L) | DAG `hh_vacancies_snapshot`: HH.ru → `bronze_hh_vacancies`; DAG `trudvsem_vacancies_snapshot`: «Работа России» → `bronze_trudvsem_vacancies` |
+| Transform (T) | DAG `dbt_hh_transform`: HH bronze → silver → gold; модели dbt для «Работы России» добавлены отдельной веткой staging/silver |
 | Медальонный DWH | Три базы ClickHouse: `dpib` / `dpib_silver` / `dpib_gold` |
 | Метрики | Airflow через StatsD → Prometheus; ClickHouse через встроенный `:9363` |
 | CI | GitHub Actions: статический lint (~25 сек) |
@@ -52,6 +56,13 @@ HH.ru (каждые 4 часа, cron: 0 */4 * * *)
                                       ├── dbt_test_silver  grain уникальность
                                       ├── dbt_run_gold     gold_skills_top (table)
                                       └── check_silver     контрольный SELECT + grain
+
+«Работа России» (каждые 6 часов, cron: 40 */6 * * *)
+    │
+    ▼  trudvsem_vacancies_snapshot
+    ├── make_snapshot_id        UUID на весь батч
+    ├── ingest_search[0..3]     4 поисковых запроса, открытый API без ключа
+    └── report_total            сводка по батчу
 ```
 
 ### Медальонная архитектура
@@ -60,8 +71,11 @@ HH.ru (каждые 4 часа, cron: 0 */4 * * *)
 База ClickHouse   Объект                  Тип    Что внутри
 ────────────────  ──────────────────────  ─────  ───────────────────────────────────────
 dpib              bronze_hh_vacancies     table  raw_json, append-only, не модифицируем
+dpib              bronze_trudvsem_vacancies table raw_json «Работы России», append-only
 dpib_silver       stg_hh_vacancies        view   JSONExtract + quality_score + has_detail
 dpib_silver       silver_hh_vacancies     table  dedup по (snapshot_id, vacancy_id)
+dpib_silver       stg_trudvsem_vacancies  view   JSONExtract открытого API «Работы России»
+dpib_silver       silver_trudvsem_vacancies table dedup по (snapshot_id, vacancy_id)
 dpib_gold         gold_skills_top         table  топ навыков по latest-снапшоту
 ```
 
@@ -185,8 +199,8 @@ data-platform-in-a-box/
     ├── packages.yml
     ├── macros/generate_schema_name.sql ← silver→dpib_silver, gold→dpib_gold
     └── models/
-        ├── staging/{_sources.yml, _stg_hh_vacancies.yml, stg_hh_vacancies.sql}
-        ├── silver/{_silver_hh_vacancies.yml, silver_hh_vacancies.sql}
+        ├── staging/{_sources.yml, _stg_hh_vacancies.yml, stg_hh_vacancies.sql, ...trudvsem...}
+        ├── silver/{_silver_hh_vacancies.yml, silver_hh_vacancies.sql, ...trudvsem...}
         └── gold/gold_skills_top.sql
 ```
 
