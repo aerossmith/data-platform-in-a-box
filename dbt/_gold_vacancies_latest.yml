@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: gold_vacancies_latest
+    description: >
+      Актуальные вакансии: одна строка на (source, vacancy_id),
+      взятая из самого свежего snapshot. Отфильтрованы только
+      целевые регионы: msk / spb / remote.
+      Плюс утилити-поля: primary_role, salary_midpoint,
+      published_month, description_length — для быстрых
+      дашбордов без агрегаций в панелях.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - source
+            - vacancy_id
+    columns:
+      - name: source
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['hh', 'trudvsem']
+      - name: vacancy_id
+        data_tests:
+          - not_null
+      - name: title
+        data_tests:
+          - not_null
+      - name: region_normalized
+        description: "Всегда заполнен: msk / spb / remote"
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['msk', 'spb', 'remote']
+      - name: primary_role
+        description: "Одна главная роль вакансии из roles_normalized"
+      - name: salary_midpoint
+        description: "Середина зарплатной вилки для сортировки. NULL если нет данных."
+      - name: published_month
+        description: "Начало месяца публикации — для группировки по месяцам"
+        data_tests:
+          - not_null

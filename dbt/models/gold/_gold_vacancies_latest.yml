@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: gold_vacancies_latest
+    description: >
+      Актуальные вакансии: одна строка на (source, vacancy_id).
+      Только целевые регионы (msk / spb / remote).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - source
+            - vacancy_id
+    columns:
+      - name: source
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['hh', 'trudvsem']
+      - name: vacancy_id
+        data_tests:
+          - not_null
+      - name: title
+        data_tests:
+          - not_null
+      - name: region_normalized
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['msk', 'spb', 'remote']
+      - name: published_month
+        data_tests:
+          - not_null

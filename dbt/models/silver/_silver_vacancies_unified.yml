@@ -1,0 +1,48 @@
+version: 2
+
+models:
+  - name: silver_vacancies_unified
+    description: >
+      Общий контракт вакансий поверх source-specific silver.
+      Не изменяет silver_hh/silver_trudvsem, только читает их.
+      Grain: (source, snapshot_id, vacancy_id).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - source
+            - snapshot_id
+            - vacancy_id
+    columns:
+      - name: source
+        description: "Источник: hh или trudvsem"
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['hh', 'trudvsem']
+      - name: snapshot_id
+        data_tests:
+          - not_null
+      - name: vacancy_id
+        data_tests:
+          - not_null
+      - name: title
+        description: "Название вакансии"
+        data_tests:
+          - not_null
+      - name: region_normalized
+        description: >
+          msk / spb / remote или NULL. NULL допустим — фильтруется в gold.
+          Проверка допустимых значений вынесена в gold_vacancies_latest.
+      - name: salary_currency
+        description: "Валюта. Пока только RUB."
+        data_tests:
+          - accepted_values:
+              values: ['RUB']
+      - name: published_at
+        description: "Дата публикации; у HH — fallback на ingested_at"
+        data_tests:
+          - not_null
+      - name: published_at_is_precise
+        description: "true если дата из API, false если fallback"
+        data_tests:
+          - not_null

@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: silver_vacancies_unified
+    description: >
+      Общий контракт вакансий поверх source-specific silver.
+      Не изменяет исходные silver_hh/silver_trudvsem, только читает их.
+      Grain: (source, snapshot_id, vacancy_id).
+      Даёт унифицированные region_normalized, salary_from/to (числа),
+      experience_min/max_years (числа) и описание. Source-specific
+      поля сохранены под префиксами hh_ и tv_.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - source
+            - snapshot_id
+            - vacancy_id
+    columns:
+      - name: source
+        description: "Источник: hh или trudvsem"
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['hh', 'trudvsem']
+      - name: snapshot_id
+        data_tests:
+          - not_null
+      - name: vacancy_id
+        data_tests:
+          - not_null
+      - name: title
+        description: "Название вакансии"
+        data_tests:
+          - not_null
+      - name: region_normalized
+        description: "Классификатор: msk / spb / remote / NULL"
+        data_tests:
+          - accepted_values:
+              values: ['msk', 'spb', 'remote']
+              quote: true
+              # NULL допустим — фильтруется в gold
+              config:
+                where: "region_normalized IS NOT NULL"
+      - name: salary_currency
+        description: "Валюта. Пока только RUB."
+        data_tests:
+          - accepted_values:
+              values: ['RUB']
+      - name: published_at
+        description: "Дата публикации (у HH = ingested_at, флаг ниже)"
+        data_tests:
+          - not_null
+      - name: published_at_is_precise
+        description: "true если дата взята из API источника, false если fallback на ingested_at"
+        data_tests:
+          - not_null
