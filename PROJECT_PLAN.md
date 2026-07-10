@@ -1,7 +1,7 @@
 # Data Platform in a Box — План проекта
 
-Версия: 3.1
-Дата: июнь 2026
+Версия: 3.2
+Дата: июль 2026
 
 ---
 
@@ -36,6 +36,21 @@
 ---
 
 ## Контрольный успешный прогон шага 4
+
+### Multi-source unified contract
+
+- dbt run/test staging: 2 модели, 26 тестов PASS
+- dbt run/test silver: 3 модели, 20 тестов PASS
+- dbt run/test gold: 2 модели, 8 тестов PASS
+- Airflow `dbt_hh_transform` manual run `manual__2026-07-10T09:39:00.775958+00:00_j2dQGi66` — success
+- `silver_hh_vacancies`: 19180 строк, grain `(snapshot_id, vacancy_id)` уникален
+- `silver_trudvsem_vacancies`: 2302 строки, grain `(snapshot_id, vacancy_id)` уникален
+- `silver_vacancies_unified`: 21482 строки, grain `(source, snapshot_id, vacancy_id)` уникален
+- `gold_vacancies_latest`: 1481 строка, grain `(source, vacancy_id)` уникален
+- HH salary parser нормализует NBSP/narrow NBSP; медиана HH RUB в Gold стала 230000, а не `200`
+- One-time cleanup старых отключённых системных логов ClickHouse освободил память: ClickHouse вернулся примерно к 1.0 GiB RSS, фоновые merge пустые
+
+### HH-only контрольный прогон
 
 - ingest run: `manual__2026-06-29T10:01:46+00:00` — success
 - dbt run: `manual__2026-06-29T10:10:37+00:00` — success
@@ -77,6 +92,9 @@ Platform Engineer × msk + spb + remote. curl_cffi `impersonate=chrome120`
 - три базы: `dpib` (bronze) / `dpib_silver` (staging + silver) / `dpib_gold`
 - `stg_hh_vacancies` view с JSONExtract + quality_score
 - `silver_hh_vacancies` table с dedup по `(snapshot_id, vacancy_id)`
+- `stg_trudvsem_vacancies` view и `silver_trudvsem_vacancies` table
+- `silver_vacancies_unified` table — общий контракт двух источников
+- `gold_vacancies_latest` table — latest-вакансии HH + «Работа России»
 - `gold_skills_top` table с argMax по latest-снапшоту
 - 22 теста (`data_tests:` синтаксис), все зелёные
 
@@ -138,6 +156,22 @@ Platform Engineer × msk + spb + remote. curl_cffi `impersonate=chrome120`
     `:9363` продолжает работать — он читает текущие значения через
     `system.metrics` / `system.events` / `system.asynchronous_metrics`
     (real-time, не таблицы). Query log оставлен для диагностики SQL.
+
+11. **One-time cleanup старых system log tables** — после отключения логов в
+    config старые части всё равно оставались в persistent volume и продолжали
+    background merge, из-за чего свежий dbt Silver падал с
+    `MEMORY_LIMIT_EXCEEDED`. Очищены только отключённые runtime-логи:
+    `text_log`, `metric_log`, `asynchronous_metric_log`, `trace_log`,
+    `processors_profile_log`. Бизнес-таблицы и `query_log` не трогались.
+
+12. **`silver_hh_vacancies` без window sort** — best-row выбирается через
+    `argMax(tuple(...), tuple(quality_score, description_length, ingested_at))`
+    в одной агрегации. Это сохраняет grain и снижает память по сравнению со
+    старым `row_number() + LEFT JOIN`.
+
+13. **Salary parser для HH HTML fallback** — перед regex нормализуются обычные
+    пробелы, NBSP и narrow NBSP. Зарплата `350 000 ₽` больше не превращается
+    в `350`; валюты сохраняются без FX-пересчёта.
 
 **Тесты dbt:**
 - staging тесты с `where: snapshot_id = (последний полный снапшот)` —

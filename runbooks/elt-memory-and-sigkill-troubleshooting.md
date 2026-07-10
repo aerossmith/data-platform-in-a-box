@@ -147,6 +147,47 @@ def ingest_combo(...):
 
 Query log оставлять — нужен для диагностики реальных запросов.
 
+**Важно:** отключение логов в конфиге не удаляет старые части, которые уже
+лежат в persistent volume. Если после применения config.d база всё равно
+тратит память на merge системных логов, нужен разовый cleanup только
+отключённых runtime-таблиц. Сначала убедиться, что нет активных пользовательских
+запросов, затем остановить merge, очистить старые таблицы и вернуть merge:
+
+```sql
+SELECT database, table, elapsed, progress
+FROM system.merges
+WHERE database = 'system'
+  AND table IN (
+    'text_log', 'metric_log', 'asynchronous_metric_log',
+    'trace_log', 'processors_profile_log'
+  );
+```
+
+```sql
+SYSTEM STOP MERGES system.text_log;
+SYSTEM STOP MERGES system.metric_log;
+SYSTEM STOP MERGES system.asynchronous_metric_log;
+SYSTEM STOP MERGES system.trace_log;
+SYSTEM STOP MERGES system.processors_profile_log;
+
+TRUNCATE TABLE IF EXISTS system.text_log;
+TRUNCATE TABLE IF EXISTS system.metric_log;
+TRUNCATE TABLE IF EXISTS system.asynchronous_metric_log;
+TRUNCATE TABLE IF EXISTS system.trace_log;
+TRUNCATE TABLE IF EXISTS system.processors_profile_log;
+
+SYSTEM JEMALLOC PURGE;
+
+SYSTEM START MERGES system.text_log;
+SYSTEM START MERGES system.metric_log;
+SYSTEM START MERGES system.asynchronous_metric_log;
+SYSTEM START MERGES system.trace_log;
+SYSTEM START MERGES system.processors_profile_log;
+```
+
+Не трогать `query_log` и пользовательские базы. Это диагностические runtime-логи,
+а не данные продукта.
+
 ### Причина D: параллельные воркеры на одной БД
 
 **Симптом:** одиночный запуск проходит, параллельный мапинг — падает.

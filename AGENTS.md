@@ -23,8 +23,9 @@
 - «Работа России» → `bronze_trudvsem_vacancies`.
 
 Не объединять разные payload в одной Bronze-таблице. Общий контракт строить
-в staging/silver только после получения реального payload «Работы России»
-и сверки зарплаты, региона, графика, описания и дат с HH.
+только в staging/silver/gold после проверки реального payload источника и
+сверки зарплаты, региона, графика, описания и дат с уже подключёнными
+источниками.
 
 HH API для соискательских/исследовательских приложений недоступен; рабочий путь
 проекта — ограниченный HTML fallback. Не усиливать обход антибот-защиты.
@@ -32,8 +33,9 @@ SuperJob исключён из проекта: ключ приложения н�
 России» использует открытый API без ключа. Контактные данные людей в новые
 Bronze-таблицы не сохранять.
 
-Новый DAG `trudvsem_vacancies_snapshot` пока реализует только Bronze. До
-расширения Silver требуется runtime-проверка после запуска контейнеров.
+`trudvsem_vacancies_snapshot` пишет только Bronze. Staging/Silver/Gold для
+«Работы России» строятся DAG-ом `dbt_hh_transform` вместе с HH через общий
+контракт `silver_vacancies_unified` и витрину `gold_vacancies_latest`.
 
 ## Рабочие команды
 
@@ -46,6 +48,7 @@ make clickhouse-bootstrap
 make clickhouse-multi-source-bootstrap
 make airflow-list-dags
 make airflow-trigger DAG=trudvsem_vacancies_snapshot
+make airflow-trigger DAG=dbt_hh_transform
 ```
 
 Статические проверки без запуска сервисов:
@@ -74,6 +77,7 @@ docker exec dpib-airflow-scheduler airflow dags list-import-errors
 - секреты и контактные данные не попали в Git или логи.
 
 Для HH дополнительно требуется полный snapshot из шести поисковых комбинаций.
+Для «Работы России» требуется полный snapshot из четырёх поисковых запросов.
 
 ## Мониторинг
 

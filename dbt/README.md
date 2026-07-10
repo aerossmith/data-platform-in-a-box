@@ -12,8 +12,8 @@ dbt-проект поверх Bronze-таблиц вакансий в ClickHouse
 | База | Что внутри | Кто пишет |
 |---|---|---|
 | `dpib` | `bronze_hh_vacancies`, `bronze_trudvsem_vacancies` | ingest DAG-и |
-| `dpib_silver` | `stg_hh_vacancies`, `stg_trudvsem_vacancies` (view), `silver_hh_vacancies`, `silver_trudvsem_vacancies` (table) | dbt |
-| `dpib_gold` | `gold_skills_top` (table) | dbt |
+| `dpib_silver` | `stg_hh_vacancies`, `stg_trudvsem_vacancies` (view), `silver_hh_vacancies`, `silver_trudvsem_vacancies`, `silver_vacancies_unified` (table) | dbt |
+| `dpib_gold` | `gold_skills_top`, `gold_vacancies_latest` (table) | dbt |
 
 Базы создаются при первом старте ClickHouse через `init/clickhouse/03_create_databases.sql`.
 Для уже работающего контейнера: `make clickhouse-bootstrap`.
@@ -28,14 +28,18 @@ bronze_hh_vacancies   dpib        append-only, raw_json (не трогаем)
 stg_hh_vacancies      dpib_silver view: JSONExtract + quality_score + has_detail
         |
 silver_hh_vacancies   dpib_silver table: dedup + фильтр complete_snapshots
-        |
-gold_skills_top       dpib_gold   table: топ навыков по latest-снапшоту
+        ├─> gold_skills_top          dpib_gold   table: топ HH-навыков по latest-снапшоту
+        └─> silver_vacancies_unified dpib_silver table: общий контракт HH + «Работа России»
 
 bronze_trudvsem_vacancies   dpib        append-only, raw_json (не трогаем)
         |
 stg_trudvsem_vacancies      dpib_silver view: JSONExtract открытого API
         |
 silver_trudvsem_vacancies   dpib_silver table: dedup + фильтр complete_snapshots по 4 запросам
+        |
+silver_vacancies_unified    dpib_silver table: общий контракт HH + «Работа России»
+        |
+gold_vacancies_latest       dpib_gold   table: latest-вакансии двух источников
 ```
 
 ---
@@ -105,6 +109,22 @@ WITH complete_snapshots AS (
 не поддерживается в `dbt deps`, поэтому держим настройку в профиле — она
 применяется только к `run` / `test`.
 
+**Query settings в `dbt_project.yml`:** для локального ClickHouse с лимитом
+3 GiB у silver/gold моделей выставлены `max_threads=1` и spill-пороги
+`max_bytes_before_external_group_by/sort=64MiB`. Это не меняет результат, но
+не даёт одному запросу съесть весь cgroup-лимит.
+
+**HH Silver без window sort:** `silver_hh_vacancies` выбирает лучшую строку
+через `argMax(tuple(...), tuple(quality_score, description_length, ingested_at))`
+и собирает `matched_queries` в той же агрегации. Это заменяет старую схему
+`row_number() + LEFT JOIN`, которая лишний раз сканировала staging и давила
+память на локальном стенде.
+
+**Зарплаты HH из HTML:** в `silver_vacancies_unified` salary-парсер
+нормализует обычные пробелы, NBSP и narrow NBSP перед regex. Без этого строки
+вида `350 000 ₽` могли парситься как `350`. Валюта сохраняется как исходная
+`RUB/USD/EUR/BYN/KZT/UZS`, без пересчёта курсов.
+
 **Кеш dbt_packages:** при запуске через Airflow первый `dbt_deps` устанавливает
 пакеты в `/tmp/dbt-packages-cache`, последующие просто `cp -r` из кеша.
 Сэкономили ~2-3 минуты на каждый ран.
@@ -170,11 +190,13 @@ dbt/
     │   └── stg_trudvsem_vacancies.sql JSONExtract payload «Работы России»
     ├── silver/
     │   ├── _silver_hh_vacancies.yml
-    │   ├── silver_hh_vacancies.sql  CTE complete_snapshots + row_number()
+    │   ├── silver_hh_vacancies.sql  CTE complete_snapshots + argMax best-row
     │   ├── _silver_trudvsem_vacancies.yml
-    │   └── silver_trudvsem_vacancies.sql dedup по (snapshot_id, vacancy_id)
+    │   ├── silver_trudvsem_vacancies.sql dedup по (snapshot_id, vacancy_id)
+    │   └── silver_vacancies_unified.sql общий контракт источников
     └── gold/
-        └── gold_skills_top.sql  argMax + ARRAY JOIN по skills
+        ├── gold_vacancies_latest.sql latest-вакансии двух источников
+        └── gold_skills_top.sql       argMax + ARRAY JOIN по skills
 ```
 
 ---
@@ -195,8 +217,10 @@ dbt/
 0 — неизвестно
 ```
 
-**Выбор лучшей строки в silver:**
-`ROW_NUMBER() OVER (PARTITION BY snapshot_id, vacancy_id ORDER BY quality_score DESC, description_length DESC, ingested_at DESC)`
+**Выбор лучшей строки в HH silver:**
+`argMax(tuple(...), tuple(quality_score, description_length, ingested_at))`
+на grain `(snapshot_id, vacancy_id)`. Это даёт тот же best-row контракт без
+дорогого window sort.
 
 **Маппинг баз через макрос:**
 `generate_schema_name.sql` переопределяет стандартный dbt-маппинг.
@@ -206,13 +230,15 @@ dbt/
 
 ## Контрольный прогон (для справки)
 
-После всех фиксов (29 июня 2026):
-- snapshot_id `a87ffbd8-cac0-4ac5-a81a-aa1131437cf3` — полный (6 комбинаций)
-- bronze: 432 строки → silver: 380 строк (dedup + best-row)
-- grain (snapshot_id, vacancy_id) уникален
-- staging tests: 17/17 PASS, silver tests: 5/5 PASS
-- partial_rows_in_silver = 0
-- gold_skills_top: 422 строки
+После фикса unified/gold и памяти ClickHouse (10 июля 2026):
+- `dbt run/test staging` — 2 модели, 26 тестов PASS
+- `dbt run/test silver` — 3 модели, 20 тестов PASS
+- `dbt run/test gold` — 2 модели, 8 тестов PASS
+- Airflow `dbt_hh_transform` manual run — success
+- `silver_hh_vacancies`: 19180 строк, grain уникален
+- `silver_trudvsem_vacancies`: 2302 строки, grain уникален
+- `silver_vacancies_unified`: 21482 строки, grain уникален
+- `gold_vacancies_latest`: 1481 строка, grain `(source, vacancy_id)` уникален
 
 ---
 

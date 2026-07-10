@@ -34,10 +34,11 @@ models:
           msk / spb / remote или NULL. NULL допустим — фильтруется в gold.
           Проверка допустимых значений вынесена в gold_vacancies_latest.
       - name: salary_currency
-        description: "Валюта. Пока только RUB."
+        description: "Валюта исходной зарплаты без пересчёта курсов."
         data_tests:
+          - not_null
           - accepted_values:
-              values: ['RUB']
+              values: ['RUB', 'USD', 'EUR', 'BYN', 'KZT', 'UZS']
       - name: published_at
         description: "Дата публикации; у HH — fallback на ingested_at"
         data_tests:

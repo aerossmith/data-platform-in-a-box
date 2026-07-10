@@ -39,7 +39,19 @@ models:
       +schema: silver
       +engine: 'MergeTree'
       +order_by: '(snapshot_id, vacancy_id)'
+      # Полные пересборки читают текстовые поля и сортируют строки MergeTree.
+      # На локальном лимите ClickHouse 3 GiB ограничиваем параллелизм и
+      # разрешаем ранний spill на диск вместо MEMORY_LIMIT_EXCEEDED.
+      +query_settings:
+        max_threads: 1
+        max_block_size: 512
+        max_bytes_before_external_group_by: 67108864
+        max_bytes_before_external_sort: 67108864
     gold:
       +materialized: table
       +schema: gold
       +engine: 'MergeTree'
+      +query_settings:
+        max_threads: 1
+        max_bytes_before_external_group_by: 67108864
+        max_bytes_before_external_sort: 67108864

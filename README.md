@@ -25,7 +25,7 @@
 | Мониторинг | Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter |
 | Оркестрация | Airflow 3.x с CeleryExecutor (6 контейнеров) |
 | Ingest (E+L) | DAG `hh_vacancies_snapshot`: HH.ru → `bronze_hh_vacancies`; DAG `trudvsem_vacancies_snapshot`: «Работа России» → `bronze_trudvsem_vacancies` |
-| Transform (T) | DAG `dbt_hh_transform`: HH bronze → silver → gold; модели dbt для «Работы России» добавлены отдельной веткой staging/silver |
+| Transform (T) | DAG `dbt_hh_transform`: HH + «Работа России» → staging/silver → unified silver → gold |
 | Медальонный DWH | Три базы ClickHouse: `dpib` / `dpib_silver` / `dpib_gold` |
 | Метрики | Airflow через StatsD → Prometheus; ClickHouse через встроенный `:9363` |
 | CI | GitHub Actions: статический lint (~25 сек) |
@@ -50,11 +50,11 @@ HH.ru (каждые 4 часа, cron: 0 */4 * * *)
                                       │
                                       ├── check_bronze     проверка наличия данных
                                       ├── dbt_deps         пакеты из кеша (~5 сек)
-                                      ├── dbt_run_staging  stg_hh_vacancies (view)
+                                      ├── dbt_run_staging  stg_hh_vacancies + stg_trudvsem_vacancies (view)
                                       ├── dbt_test_staging not_null, accepted_values
-                                      ├── dbt_run_silver   silver_hh_vacancies (table)
-                                      ├── dbt_test_silver  grain уникальность
-                                      ├── dbt_run_gold     gold_skills_top (table)
+                                      ├── dbt_run_silver   source silver + silver_vacancies_unified
+                                      ├── dbt_test_silver  grain уникальность + контракт
+                                      ├── dbt_run_gold     gold_skills_top + gold_vacancies_latest
                                       └── check_silver     контрольный SELECT + grain
 
 «Работа России» (каждые 6 часов, cron: 40 */6 * * *)
@@ -76,7 +76,9 @@ dpib_silver       stg_hh_vacancies        view   JSONExtract + quality_score + h
 dpib_silver       silver_hh_vacancies     table  dedup по (snapshot_id, vacancy_id)
 dpib_silver       stg_trudvsem_vacancies  view   JSONExtract открытого API «Работы России»
 dpib_silver       silver_trudvsem_vacancies table dedup по (snapshot_id, vacancy_id)
+dpib_silver       silver_vacancies_unified table общий контракт HH + «Работа России»
 dpib_gold         gold_skills_top         table  топ навыков по latest-снапшоту
+dpib_gold         gold_vacancies_latest   table  latest-вакансии двух источников
 ```
 
 ---
@@ -148,6 +150,11 @@ GROUP BY 1, 2 ORDER BY 1, 2;
 SELECT count() AS rows, uniq((snapshot_id, vacancy_id)) AS unique_keys
 FROM dpib_silver.silver_hh_vacancies;
 -- rows должно == unique_keys
+
+-- Unified + Gold: оба источника в общей витрине
+SELECT source, count()
+FROM dpib_gold.gold_vacancies_latest
+GROUP BY source ORDER BY source;
 
 -- Silver: качество payload
 SELECT source_mode, detail_status, count()

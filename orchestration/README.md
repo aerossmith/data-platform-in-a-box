@@ -33,6 +33,7 @@ StatsD   принимает UDP-метрики от Airflow (профиль core
 | DAG | Schedule | Тип | Описание |
 |---|---|---|---|
 | `hh_vacancies_snapshot` | `0 */4 * * *` | E+L | HH.ru → bronze_hh_vacancies |
+| `trudvsem_vacancies_snapshot` | `40 */6 * * *` | E+L | «Работа России» → bronze_trudvsem_vacancies |
 | `dbt_hh_transform` | `None` | T | bronze → silver → gold через dbt |
 
 ELT-связка: последняя задача `hh_vacancies_snapshot` — `trigger_dbt_transform` —
@@ -125,9 +126,9 @@ make clickhouse-multi-source-bootstrap
 make airflow-trigger DAG=trudvsem_vacancies_snapshot
 ```
 
-Первый этап заканчивается в Bronze. Общий Silver следует строить после получения
-реального payload «Работы России» и сверки полей зарплаты, региона, графика,
-описания и даты публикации с HH.
+Ingest заканчивается в Bronze. Общий контракт строится дальше в dbt:
+`stg_trudvsem_vacancies` → `silver_trudvsem_vacancies` →
+`silver_vacancies_unified` → `gold_vacancies_latest`.
 
 ---
 
@@ -137,11 +138,11 @@ make airflow-trigger DAG=trudvsem_vacancies_snapshot
 |---|---|---|
 | `check_bronze` | Python | Читает snapshot_id из dag_run.conf, проверяет 6 комбинаций |
 | `dbt_deps` | Bash | Копирует проект в /tmp, восстанавливает пакеты из кеша |
-| `dbt_run_staging` | Bash | dbt run staging → stg_hh_vacancies (view) |
+| `dbt_run_staging` | Bash | dbt run staging → HH + trudvsem staging views |
 | `dbt_test_staging` | Bash | dbt test staging → not_null, accepted_values |
-| `dbt_run_silver` | Bash | dbt run silver → silver_hh_vacancies (table) |
-| `dbt_test_silver` | Bash | dbt test silver → unique_combination_of_columns |
-| `dbt_run_gold` | Bash | dbt run gold → gold_skills_top (table) |
+| `dbt_run_silver` | Bash | dbt run silver → source silver + unified silver |
+| `dbt_test_silver` | Bash | dbt test silver → grain + unified contract |
+| `dbt_run_gold` | Bash | dbt run gold → gold_skills_top + gold_vacancies_latest |
 | `check_silver` | Python | SELECT snapshot_id из silver, проверка grain |
 
 **`check_bronze` логика выбора snapshot_id:**
