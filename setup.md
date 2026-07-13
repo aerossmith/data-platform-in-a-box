@@ -1,47 +1,29 @@
-Скриншоты
+# DPIB: заметки по портфельному оформлению
 
-Grafana дашборды
-Airflow UI
-AI Assistant в работе
-Kubernetes Dashboard
+Этот файл — краткая памятка, а не описание уже реализованной архитектуры.
+Актуальное состояние и рабочие команды находятся в корневом `README.md` и
+`PROJECT_PLAN.md`.
 
-(добавь изображения)
-📚 Чему я научился / Закрытые гэпы
+## Реализовано
 
-Kubernetes + Helm в production-like сценариях
-Полноценный Terraform + GitHub Actions CI/CD
-Современные практики GitOps
-Интеграция LLM в эксплуатационные процессы
-Глубокая observability DWH-систем
+- локальный Docker Compose-контур: ClickHouse, PostgreSQL, Redis, Airflow,
+  Prometheus, Grafana и exporters;
+- ingestion вакансий из HH и «Работы России» в отдельные Bronze-таблицы;
+- dbt-конвейер Bronze → Silver → Gold с общим контрактом вакансий;
+- технические Grafana-дашборды для Overview, ClickHouse и Airflow;
+- статическая проверка в GitHub Actions.
 
-🔮 Roadmap
+## Не реализовано и не должно заявляться как готовое
 
- ArgoCD / Flux (GitOps)
- Vault для секретов
- Chaos Engineering эксперименты
- Multi-cloud deployment (Yandex Cloud + local)
+- Superset и аналитические дашборды;
+- Kubernetes, Helm, Terraform, GitOps и production-развёртывание;
+- RAG/AI-ассистент, n8n-интеграции и AIOps;
+- облачная или multi-cloud инфраструктура.
 
-📄 Лицензия
-MIT
+## Ближайший честный roadmap
 
-Дополнительные советы по оформлению
-
-Создай папки в репозитории:
-/terraform
-/ansible
-/k8s (helm charts)
-/docker-compose
-/docs
-/ai-agent
-
-Добавь Makefile — это очень любят рекрутеры.
-Сделай отдельный файл architecture.md с подробной диаграммой.
-В резюме пиши так:Pet Project: Data Platform in a Box
-Развёрнутая end-to-end аналитическая платформа (ClickHouse, Airflow, Superset, Prometheus/Grafana) с IaC (Terraform), CI/CD (GitHub Actions) и Kubernetes. Реализован RAG AI-ассистент для DBA-задач. GitHub
-
-Хочешь, я сейчас набросаю:
-
-Пример Makefile
-Структура Terraform-модулей
-Промпт для AI-агента
-Или текст для раздела "Чему я научился" подробнее
+1. Накопить несколько полных плановых циклов ingestion и подтвердить свежесть
+   Bronze → Silver → Gold.
+2. Реализовать Superset поверх Gold-витрин для аналитики рынка труда.
+3. После этого выбирать следующий инфраструктурный этап отдельно, не выдавая
+   планируемые компоненты за существующие.

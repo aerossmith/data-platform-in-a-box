@@ -1,6 +1,6 @@
 # Data Platform in a Box — План проекта
 
-Версия: 3.2
+Версия: 3.3
 Дата: июль 2026
 
 ---
@@ -25,7 +25,7 @@
 | 2.5 | CI — GitHub Actions, статический lint | ✅ готово |
 | 3 | Orchestration — Airflow 3.x + ingest HH.ru → bronze | ✅ готово |
 | 4 | Transform — dbt bronze → silver → gold, автозапуск из Airflow | ✅ готово |
-| 5 | Grafana дашборды с реальными метриками CH + Airflow | 🔜 следующий |
+| 5 | Grafana: технические дашборды ClickHouse + Airflow | ✅ готово |
 | 6 | Superset — дашборд поверх gold-витрин | ⏳ |
 | 7 | `make demo` — one-command deploy с данными | ⏳ |
 | 8 | AI-слой — Qdrant + RAG поверх runbooks | ⏳ |
@@ -186,24 +186,27 @@ Platform Engineer × msk + spb + remote. curl_cffi `impersonate=chrome120`
 
 ## Что дальше
 
-### Шаг 5 — Grafana дашборды (следующий)
+### Шаг 5 — Grafana дашборды (готово)
 
-Данные уже идут в Prometheus, нужны дашборды.
+В Grafana заведены три технических дашборда в папке `DPIB`:
 
-**ClickHouse health:**
-- ProfileEvent_Query
-- ProfileEvent_InsertedRows
-- AsynchronousMetric_TotalPartsOfMergeTreeTables
-- размер таблиц по слоям через SQL-datasource
+- `DPIB — Overview`;
+- `DPIB — ClickHouse Health` через datasource ClickHouse;
+- `DPIB — Airflow Health` через Prometheus.
 
-**Airflow health:**
-- airflow_dag_*_duration
-- airflow_operator_failures_*
-- airflow_scheduler_heartbeat
-- airflow_celery_*
+Шаг не включает аналитические графики и правила алертинга. Они остаются
+соответственно для Superset и будущего AIOps-этапа.
+
+**Воспроизводимость:** JSON-дашборды и YAML datasource лежат в
+`config/grafana/` и provisioning выполняется при старте контейнера. Для
+Airflow зафиксирован UID `prometheus`, для ClickHouse — `clickhouse-dpib`;
+это исключает ручную привязку datasource после запуска. Диагностика описана в
+`runbooks/grafana-provisioning-troubleshooting.md`.
 
 ### Шаг 6 — Superset
-Профиль `viz`, подключение к ClickHouse, дашборд поверх dpib_gold.
+Профиль `viz`, подключение к ClickHouse и аналитические дашборды поверх
+`dpib_gold`. До начала этапа накопить несколько полных плановых циклов
+ingestion и подтвердить свежесть цепочки Bronze → Silver → Gold.
 
 ### Шаг 7 — `make demo`
 One-command deploy с данными за 3-5 минут.

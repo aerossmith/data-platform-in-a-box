@@ -41,6 +41,17 @@ ELT-связка: последняя задача `hh_vacancies_snapshot` — `t
 **конкретный** snapshot_id завершённого ingest в downstream-трансформацию,
 а не "последнюю запись по времени" (которая может быть частичной от упавшего рана).
 
+## Наблюдение за Airflow
+
+Технический дашборд `DPIB — Airflow Health` показывает доступность scheduler,
+ошибки импорта DAG-ов, состояние executor и накопительные результаты запусков.
+Он берёт метрики из Prometheus через datasource UID `prometheus`.
+
+Дашборд помогает заметить проблему, но не подтверждает качество данных:
+после ingestion проверять snapshot и Bronze-критерии из корневого `AGENTS.md`.
+Порядок проверки provisioning Grafana — в
+[`runbooks/grafana-provisioning-troubleshooting.md`](../runbooks/grafana-provisioning-troubleshooting.md).
+
 ---
 
 ## hh_vacancies_snapshot: как работает

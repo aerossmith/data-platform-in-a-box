@@ -1,0 +1,189 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "uid": "dpib-airflow",
+  "title": "DPIB — Airflow Health",
+  "tags": ["dpib", "airflow"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Scheduler жив?",
+      "id": 1,
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "increase(airflow_scheduler_heartbeat[2m]) > 0", "refId": "A"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{"type": "value", "options": {"0": {"text": "МЁРТВ", "color": "red"}, "1": {"text": "OK", "color": "green"}}}],
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Import errors",
+      "id": 2,
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_dag_processing_import_errors", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
+      ]}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none"}
+    },
+    {
+      "type": "stat",
+      "title": "Task instance failures (всего)",
+      "id": 3,
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_ti_failures", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "orange"}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Задачи убиты внешне (SIGKILL)",
+      "id": 4,
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_scheduler_tasks_killed_externally", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
+      ]}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Heartbeat всех компонентов (rate > 0)",
+      "id": 5,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "rate(airflow_scheduler_heartbeat[2m])", "refId": "A", "legendFormat": "scheduler"},
+        {"expr": "rate(airflow_dag_processor_heartbeat[2m])", "refId": "B", "legendFormat": "dag processor"},
+        {"expr": "rate(airflow_triggerer_heartbeat[2m])", "refId": "C", "legendFormat": "triggerer"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Свежесть парсинга DAG-ов (сек назад)",
+      "id": 6,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "airflow_dag_processing_last_run_seconds_ago_hh_vacancies_snapshot", "refId": "A", "legendFormat": "hh_vacancies_snapshot"},
+        {"expr": "airflow_dag_processing_last_run_seconds_ago_trudvsem_vacancies_snapshot", "refId": "B", "legendFormat": "trudvsem_vacancies_snapshot"},
+        {"expr": "airflow_dag_processing_last_run_seconds_ago_dbt_hh_transform", "refId": "C", "legendFormat": "dbt_hh_transform"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "stat",
+      "title": "Executor: running tasks",
+      "id": 7,
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_executor_running_tasks", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Executor: queued tasks",
+      "id": 8,
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_executor_queued_tasks", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 5},
+        {"color": "red", "value": 20}
+      ]}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Executor: open slots",
+      "id": 9,
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_executor_open_slots", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none"}
+    },
+    {
+      "type": "stat",
+      "title": "Pool starving tasks",
+      "id": 10,
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "airflow_pool_starving_tasks", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
+      ]}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Успешные DAG-и: суммарное время",
+      "id": 11,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "airflow_dagrun_duration_success_hh_vacancies_snapshot_sum", "refId": "A", "legendFormat": "hh_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_success_trudvsem_vacancies_snapshot_sum", "refId": "B", "legendFormat": "trudvsem_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_success_dbt_hh_transform_sum", "refId": "C", "legendFormat": "dbt_hh_transform"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Средняя длительность DAG (sum/count)",
+      "id": 12,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "airflow_dagrun_duration_success_hh_vacancies_snapshot_sum / airflow_dagrun_duration_success_hh_vacancies_snapshot_count", "refId": "A", "legendFormat": "hh_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_success_trudvsem_vacancies_snapshot_sum / airflow_dagrun_duration_success_trudvsem_vacancies_snapshot_count", "refId": "B", "legendFormat": "trudvsem_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_success_dbt_hh_transform_sum / airflow_dagrun_duration_success_dbt_hh_transform_count", "refId": "C", "legendFormat": "dbt_hh_transform"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Счётчик успешных ранов (накопительный)",
+      "id": 13,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "airflow_dagrun_duration_success_hh_vacancies_snapshot_count", "refId": "A", "legendFormat": "hh_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_success_trudvsem_vacancies_snapshot_count", "refId": "B", "legendFormat": "trudvsem_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_success_dbt_hh_transform_count", "refId": "C", "legendFormat": "dbt_hh_transform"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Счётчик упавших ранов (накопительный)",
+      "id": 14,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "airflow_dagrun_duration_failed_hh_vacancies_snapshot_count", "refId": "A", "legendFormat": "hh_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_failed_trudvsem_vacancies_snapshot_count", "refId": "B", "legendFormat": "trudvsem_vacancies_snapshot"},
+        {"expr": "airflow_dagrun_duration_failed_dbt_hh_transform_count", "refId": "C", "legendFormat": "dbt_hh_transform"}
+      ]
+    }
+  ]
+}

@@ -17,12 +17,12 @@
 
 ## Текущий статус
 
-**Шаг 4 из 10: ELT-конвейер полностью замкнут** ✅
+**Шаг 5: ELT-конвейер и технический мониторинг готовы** ✅
 
 | Слой | Что сделано |
 |---|---|
 | Инфраструктура | PostgreSQL 16 + ClickHouse 24 + Redis 7 + StatsD-exporter |
-| Мониторинг | Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter |
+| Мониторинг | Prometheus + Grafana + Alertmanager + node-exporter + cAdvisor + postgres-exporter; дашборды Overview, ClickHouse Health и Airflow Health |
 | Оркестрация | Airflow 3.x с CeleryExecutor (6 контейнеров) |
 | Ingest (E+L) | DAG `hh_vacancies_snapshot`: HH.ru → `bronze_hh_vacancies`; DAG `trudvsem_vacancies_snapshot`: «Работа России» → `bronze_trudvsem_vacancies` |
 | Transform (T) | DAG `dbt_hh_transform`: HH + «Работа России» → staging/silver → unified silver → gold |
@@ -30,7 +30,7 @@
 | Метрики | Airflow через StatsD → Prometheus; ClickHouse через встроенный `:9363` |
 | CI | GitHub Actions: статический lint (~25 сек) |
 
-Следующее: Grafana дашборды с реальными метриками ClickHouse и Airflow.
+Следующее: Superset — аналитические дашборды поверх Gold-витрин. Grafana остаётся только для технического мониторинга.
 
 ---
 
@@ -108,12 +108,12 @@ make clickhouse-bootstrap
 
 | Сервис | URL | Учётка |
 |---|---|---|
-| PostgreSQL | `localhost:5432` | `dpib` / `dpib_pass` |
-| ClickHouse | http://localhost:8123 | `dpib` / `dpib_pass` |
-| Redis | `localhost:6379` | без пароля |
+| PostgreSQL | `localhost:5432` | локальные переменные из `.env` |
+| ClickHouse | http://localhost:8123 | локальные переменные из `.env` |
+| Redis | `localhost:6379` | локальная конфигурация из `.env` |
 | StatsD exporter | http://localhost:9102/metrics | без авторизации |
 | Prometheus | http://localhost:9090 | без авторизации |
-| Grafana | http://localhost:3000 | `admin` / `admin` |
+| Grafana | http://localhost:3000 | локальные `GRAFANA_USER` / `GRAFANA_PASSWORD` из `.env` |
 | Alertmanager | http://localhost:9093 | без авторизации |
 | Airflow UI | http://localhost:8080 | без авторизации (lab-режим) |
 
@@ -192,12 +192,15 @@ data-platform-in-a-box/
 │   ├── clickhouse/{prometheus.xml, network.xml}
 │   ├── prometheus/{prometheus.yml, alerts.yml}
 │   ├── alertmanager/alertmanager.yml
-│   └── grafana/{provisioning/, dashboards/}
+│   └── grafana/
+│       ├── provisioning/{dashboards/, datasources/}
+│       └── dashboards/{dpib-overview.json, dpib-clickhouse.json, dpib-airflow.json}
 ├── orchestration/
 │   ├── README.md
 │   ├── dags/
 │   │   ├── hh_vacancies_snapshot.py    ← E+L: HH.ru → bronze
-│   │   └── dbt_hh_transform.py        ← T: bronze → silver → gold
+│   │   ├── trudvsem_vacancies_snapshot.py ← E+L: «Работа России» → bronze
+│   │   └── dbt_hh_transform.py        ← T: Bronze → Silver → Gold
 │   └── logs/
 └── dbt/
     ├── README.md
@@ -208,7 +211,11 @@ data-platform-in-a-box/
     └── models/
         ├── staging/{_sources.yml, _stg_hh_vacancies.yml, stg_hh_vacancies.sql, ...trudvsem...}
         ├── silver/{_silver_hh_vacancies.yml, silver_hh_vacancies.sql, ...trudvsem...}
-        └── gold/gold_skills_top.sql
+        └── gold/{gold_skills_top.sql, gold_vacancies_latest.sql}
+├── runbooks/
+│   ├── elt-memory-and-sigkill-troubleshooting.md
+│   ├── external-api-blocked-html-fallback.md
+│   └── grafana-provisioning-troubleshooting.md
 ```
 
 ---
@@ -224,6 +231,26 @@ data-platform-in-a-box/
 | statsd-exporter | 9102 | dag_duration, task_duration, operator_failures, celery |
 
 `statsd-exporter` входит в профиль `core` — доступен без `monitoring`.
+
+### Технические дашборды Grafana
+
+Grafana использует только технический мониторинг; аналитические срезы рынка
+труда будут строиться в Superset на следующем этапе.
+
+| Дашборд в папке `DPIB` | Источник | Назначение |
+|---|---|---|
+| `DPIB — Overview` | Prometheus | доступность сервисов, ресурсы хоста и контейнеров |
+| `DPIB — ClickHouse Health` | Prometheus + ClickHouse | память, запросы, merge, вставки и свежесть Bronze |
+| `DPIB — Airflow Health` | Prometheus | scheduler, import ошибок, executor и результаты DAG-ов |
+
+Дашборды и datasource хранятся в Git и автоматически подхватываются при
+пересоздании Grafana. Airflow-дашборд использует стабильный datasource UID
+`prometheus`, ClickHouse-дашборд — `clickhouse-dpib`. Проверка и безопасное
+пересоздание описаны в
+[runbooks/grafana-provisioning-troubleshooting.md](./runbooks/grafana-provisioning-troubleshooting.md).
+
+Зелёные панели не заменяют проверку данных: для ingestion по-прежнему нужны
+непустой snapshot, заполненные идентификаторы и отсутствие дублей в Bronze.
 
 ---
 
@@ -267,7 +294,7 @@ DPIB_HH_DETAIL_PAUSE_MAX_SEC=0.6
 
 ## Что дальше
 
-**Шаг 5** — Grafana дашборды с реальными метриками ClickHouse и Airflow.
-Минимум два дашборда: здоровье ClickHouse и здоровье Airflow.
+**Шаг 6** — Superset: аналитические дашборды поверх Gold-витрин.
+Grafana уже содержит только технические дашборды: Overview, здоровье ClickHouse и здоровье Airflow.
 
 Полный план: [PROJECT_PLAN.md](./PROJECT_PLAN.md).

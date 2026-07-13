@@ -81,6 +81,17 @@ docker exec dpib-airflow-scheduler airflow dags list-import-errors
 
 ## Мониторинг
 
+Grafana содержит только технические дашборды в папке `DPIB`:
+`DPIB — Overview`, `DPIB — ClickHouse Health` и `DPIB — Airflow Health`.
+Их JSON и provisioning datasource — часть репозитория в `config/grafana/`.
+Аналитические дашборды и расчёты зарплат не добавлять в Grafana: они относятся
+к будущему этапу Superset.
+
+Airflow-дашборд опирается на UID datasource `prometheus`, ClickHouse-дашборд —
+на `clickhouse-dpib`; не переименовывать их без синхронной правки JSON.
+Проверка provisioning, известные безвредные сообщения и границы эскалации
+описаны в `runbooks/grafana-provisioning-troubleshooting.md`.
+
 Пороговые алерты памяти проверять только на поднятом профиле `monitoring`.
 Не угадывать имена Airflow-метрик: сначала посмотреть фактический вывод
 StatsD exporter, затем добавлять алерт длительности по нескольким плановым

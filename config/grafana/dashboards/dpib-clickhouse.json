@@ -1,0 +1,138 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "uid": "dpib-clickhouse",
+  "title": "DPIB — ClickHouse Health",
+  "tags": ["dpib", "clickhouse"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Память ClickHouse — использовано",
+      "id": 1,
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "ClickHouseAsyncMetrics_CGroupMemoryUsed", "refId": "A"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 2147483648},
+            {"color": "red", "value": 2684354560}
+          ]}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Память ClickHouse — лимит (cgroup)",
+      "id": 2,
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "ClickHouseAsyncMetrics_CGroupMemoryTotal", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "color": {"mode": "fixed", "fixedColor": "blue"}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none"}
+    },
+    {
+      "type": "stat",
+      "title": "Активные запросы",
+      "id": 3,
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "ClickHouseMetrics_Query", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 5},
+        {"color": "red", "value": 15}
+      ]}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Активные merge",
+      "id": 4,
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "ClickHouseMetrics_Merge", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "purple"}}},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Память ClickHouse во времени",
+      "id": 5,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "ClickHouseAsyncMetrics_CGroupMemoryUsed", "refId": "A", "legendFormat": "used"},
+        {"expr": "ClickHouseAsyncMetrics_CGroupMemoryTotal", "refId": "B", "legendFormat": "limit"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Скорость вставки строк (rows/sec)",
+      "id": 6,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "rate(ClickHouseProfileEvents_InsertedRows[5m])", "refId": "A", "legendFormat": "InsertedRows/s"}],
+      "fieldConfig": {"defaults": {"unit": "rowsps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Parts MergeTree (всего активных)",
+      "id": 7,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "ClickHouseAsyncMetrics_TotalPartsOfMergeTreeTables", "refId": "A", "legendFormat": "total parts"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Query rate (SELECT vs Total)",
+      "id": 8,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "rate(ClickHouseProfileEvents_SelectQuery[5m])", "refId": "A", "legendFormat": "SELECT/s"},
+        {"expr": "rate(ClickHouseProfileEvents_Query[5m])", "refId": "B", "legendFormat": "Total/s"}
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Наполнение DWH (business health)",
+      "id": 100,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Свежие строки в bronze за 24ч (HH + trudvsem)",
+      "id": 9,
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-dpib"},
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT toStartOfHour(ingested_at) AS t, 'hh' AS source, count() AS rows FROM dpib.bronze_hh_vacancies WHERE ingested_at > now() - INTERVAL 24 HOUR GROUP BY t ORDER BY t",
+          "format": 1
+        },
+        {
+          "refId": "B",
+          "rawSql": "SELECT toStartOfHour(ingested_at) AS t, 'trudvsem' AS source, count() AS rows FROM dpib.bronze_trudvsem_vacancies WHERE ingested_at > now() - INTERVAL 24 HOUR GROUP BY t ORDER BY t",
+          "format": 1
+        }
+      ]
+    }
+  ]
+}
