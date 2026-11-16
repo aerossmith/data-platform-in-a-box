@@ -248,3 +248,7 @@ Alertmanager → n8n → LLM → Telegram.
   — обход ddos-guard через TLS impersonation + HTML fallback
 - [`runbooks/elt-memory-and-sigkill-troubleshooting.md`](./runbooks/elt-memory-and-sigkill-troubleshooting.md)
   — SIGKILL и MEMORY_LIMIT_EXCEEDED в ELT-конвейере: диагностика и фиксы
+- [`runbooks/data-quality-snapshot.md`](./runbooks/data-quality-snapshot.md)
+  — контрольный срез качества данных перед Superset и релизами
+- [`runbooks/wsl-docker-engine-selection.md`](./runbooks/wsl-docker-engine-selection.md)
+  — выбор единственного Docker Engine при работе из WSL и устранение конфликтов портов

@@ -6,8 +6,13 @@
 # Профили по умолчанию. Переопределяй: make up PROFILES="core monitoring"
 PROFILES ?= core
 
+# Docker CLI. В WSL при параллельном локальном Docker Engine можно явно
+# выбрать Docker Desktop: make status DOCKER=docker.exe
+DOCKER ?= docker
+
 # Собираем флаги --profile для docker compose
 PROFILE_FLAGS := $(foreach p,$(PROFILES),--profile $(p))
+COMPOSE := $(DOCKER) compose
 
 .PHONY: help up down restart status logs ps clean reset psql clickhouse-cli redis-cli \
         airflow-shell airflow-logs airflow-trigger airflow-list-dags airflow-bootstrap \
@@ -29,82 +34,82 @@ help:  ## показать список команд
 	@echo "Пример: make up PROFILES=\"core orchestration\""
 
 up:  ## поднять стек (по умолчанию профиль core)
-	docker compose $(PROFILE_FLAGS) up -d
+	$(COMPOSE) $(PROFILE_FLAGS) up -d
 	@echo ""
 	@echo "Готово. Проверь: make status"
 
 down:  ## остановить стек (тома сохраняются)
-	docker compose $(PROFILE_FLAGS) down
+	$(COMPOSE) $(PROFILE_FLAGS) down
 
 restart:  ## перезапустить стек
-	$(MAKE) down PROFILES="$(PROFILES)"
-	$(MAKE) up PROFILES="$(PROFILES)"
+	$(MAKE) down PROFILES="$(PROFILES)" DOCKER="$(DOCKER)"
+	$(MAKE) up PROFILES="$(PROFILES)" DOCKER="$(DOCKER)"
 
 status:  ## показать статус контейнеров
-	docker compose $(PROFILE_FLAGS) ps
+	$(COMPOSE) $(PROFILE_FLAGS) ps
 
 ps: status  ## алиас для status
 
 logs:  ## показать логи (make logs SVC=postgres)
 	@if [ -z "$(SVC)" ]; then \
-		docker compose $(PROFILE_FLAGS) logs -f --tail=100; \
+		$(COMPOSE) $(PROFILE_FLAGS) logs -f --tail=100; \
 	else \
-		docker compose $(PROFILE_FLAGS) logs -f --tail=100 $(SVC); \
+		$(COMPOSE) $(PROFILE_FLAGS) logs -f --tail=100 $(SVC); \
 	fi
 
 clean:  ## остановить и удалить контейнеры (тома сохраняются)
-	docker compose $(PROFILE_FLAGS) down --remove-orphans
+	$(COMPOSE) $(PROFILE_FLAGS) down --remove-orphans
 
 reset:  ## ОПАСНО: удалить контейнеры И тома (потеря данных)
 	@echo "ВНИМАНИЕ: удалятся все тома и данные!"
 	@read -p "Продолжить? [y/N] " ans; [ "$$ans" = "y" ] || exit 1
-	docker compose $(PROFILE_FLAGS) down -v --remove-orphans
+	$(COMPOSE) $(PROFILE_FLAGS) down -v --remove-orphans
 
 # ---- Подключения к сервисам ----
 psql:  ## подключиться к PostgreSQL psql-клиентом
-	docker exec -it dpib-postgres psql -U $${POSTGRES_USER:-dpib} -d $${POSTGRES_DB:-dpib}
+	$(DOCKER) exec -it dpib-postgres psql -U $${POSTGRES_USER:-dpib} -d $${POSTGRES_DB:-dpib}
 
 clickhouse-cli:  ## подключиться к ClickHouse client
-	docker exec -it dpib-clickhouse clickhouse-client \
+	$(DOCKER) exec -it dpib-clickhouse clickhouse-client \
 		--user $${CLICKHOUSE_USER:-dpib} \
 		--password $${CLICKHOUSE_PASSWORD:-dpib_pass} \
 		--database $${CLICKHOUSE_DB:-dpib}
 
 redis-cli:  ## подключиться к Redis
-	docker exec -it dpib-redis redis-cli
+	$(DOCKER) exec -it dpib-redis redis-cli
 
 # ---- Airflow ----
 airflow-shell:  ## bash внутри airflow-scheduler
-	docker exec -it dpib-airflow-scheduler bash
+	$(DOCKER) exec -it dpib-airflow-scheduler bash
 
 airflow-logs:  ## tail логов scheduler+worker одновременно
-	docker compose --profile orchestration logs -f --tail=100 airflow-scheduler airflow-worker airflow-dag-processor
+	$(COMPOSE) --profile orchestration logs -f --tail=100 airflow-scheduler airflow-worker airflow-dag-processor
 
 airflow-trigger:  ## запустить DAG вручную: make airflow-trigger DAG=hh_vacancies_snapshot
-	docker exec dpib-airflow-scheduler airflow dags trigger $(DAG)
+	$(DOCKER) exec dpib-airflow-scheduler airflow dags trigger $(DAG)
 
 airflow-list-dags:  ## показать все зарегистрированные DAG-и
-	docker exec dpib-airflow-scheduler airflow dags list
+	$(DOCKER) exec dpib-airflow-scheduler airflow dags list
 
 airflow-bootstrap:  ## создать user+db airflow в существующем PostgreSQL (если том уже был)
 	@echo "Применяю init/postgres/02_airflow.sql к работающему PostgreSQL..."
-	docker exec -i dpib-postgres psql -U $${POSTGRES_USER:-dpib} -d postgres < init/postgres/02_airflow.sql
+	$(DOCKER) exec -i dpib-postgres psql -U $${POSTGRES_USER:-dpib} -d postgres < init/postgres/02_airflow.sql
 	@echo ""
 	@echo "Готово. Теперь пересоздай Airflow контейнеры:"
-	@echo "  docker compose --profile orchestration up -d --force-recreate"
+	@echo "  $(COMPOSE) --profile orchestration up -d --force-recreate"
 
 clickhouse-bootstrap:  ## создать БД dpib_silver+dpib_gold в работающем ClickHouse (если том уже был)
 	@echo "Применяю init/clickhouse/03_create_databases.sql к работающему ClickHouse..."
-	docker exec -i dpib-clickhouse clickhouse-client \
+	$(DOCKER) exec -i dpib-clickhouse clickhouse-client \
 		--user $${CLICKHOUSE_USER:-dpib} \
 		--password $${CLICKHOUSE_PASSWORD:-dpib_pass} \
 		--multiquery < init/clickhouse/03_create_databases.sql
 	@echo ""
-	@echo "Готово. Проверь: docker exec dpib-clickhouse clickhouse-client --query 'SHOW DATABASES'"
+	@echo "Готово. Проверь: $(DOCKER) exec dpib-clickhouse clickhouse-client --query 'SHOW DATABASES'"
 
 clickhouse-multi-source-bootstrap:  ## создать дополнительные Bronze-таблицы в существующем томе
 	@echo "Применяю init/clickhouse/04_multi_source_bronze.sql..."
-	docker exec -i dpib-clickhouse clickhouse-client \
+	$(DOCKER) exec -i dpib-clickhouse clickhouse-client \
 		--user $${CLICKHOUSE_USER:-dpib} \
 		--password $${CLICKHOUSE_PASSWORD:-dpib_pass} \
 		--multiquery < init/clickhouse/04_multi_source_bronze.sql

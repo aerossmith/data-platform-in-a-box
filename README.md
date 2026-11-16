@@ -104,6 +104,14 @@ make clickhouse-bootstrap
 
 Первый старт Airflow занимает 3-5 минут (установка пакетов).
 
+> Для этого проекта базовый вариант — Docker Engine из WSL: запускай обычные
+> `make ...` без `sudo`. Если намеренно выбран Docker Desktop на Windows,
+> используй один клиент последовательно: `make status DOCKER=docker.exe` и
+> `make up PROFILES="core monitoring orchestration" DOCKER=docker.exe`.
+> Не смешивай эти варианты: два независимых движка не могут публиковать одни
+> и те же порты. Диагностика и безопасное переключение описаны в
+> [runbooks/wsl-docker-engine-selection.md](./runbooks/wsl-docker-engine-selection.md).
+
 ### Доступ к сервисам
 
 | Сервис | URL | Учётка |

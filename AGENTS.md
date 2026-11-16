@@ -39,7 +39,13 @@ Bronze-таблицы не сохранять.
 
 ## Рабочие команды
 
-Запускать из WSL:
+Запускать из WSL через Docker Engine WSL. Не смешивать его с Docker Desktop
+на Windows и не использовать `sudo make ...`: это разные движки с отдельными
+контейнерами и томами, которые конфликтуют за опубликованные порты. Переход на
+Docker Desktop — только как осознанная отдельная операция; порядок диагностики
+и переключения описан в `runbooks/wsl-docker-engine-selection.md`.
+
+```bash
 
 ```bash
 make up PROFILES="core orchestration"
